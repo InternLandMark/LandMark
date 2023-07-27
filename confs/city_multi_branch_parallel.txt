@@ -1,0 +1,60 @@
+
+datadir = ai_tower_all
+subfolder = [west]
+dataroot = /cpfs01/shared/landmarks-viewer/train_data/base/
+expname = west_x5_resMode1-2-4_branch_parallel
+downsample_train = 5
+dataset_name = city
+model_name = GridNeRF
+resMode = [1,2,4]
+ndim = 1
+sampling_opt = 0
+
+lb = [-3,-3,-0.1]
+ub = [3,3,1]
+
+add_nerf = 10000
+residnerf = 1
+
+basedir = ./log
+
+train_near_far = [1e-1, 4]
+render_near_far = [2e-1, 4]
+
+
+
+batch_size = 8192
+
+N_voxel_init = 2097156 # 128**3
+N_voxel_final = 1073741824 # 1024**3
+
+upsamp_list = [2000,3000,4000,5500,7000]
+update_AlphaMask_list = [2000,4000]
+n_iters = 50000
+
+N_vis = 5
+vis_every = 5000
+
+n_lamb_sigma = [16,16,16]
+n_lamb_sh    = [48,48,48]
+
+fea2denseAct = softplus
+
+view_pe = 2
+fea_pe = 2
+
+L1_weight_inital = 8e-5
+L1_weight_rest = 4e-5
+rm_weight_mask_thre = 1e-4
+
+TV_weight_density = 0.1
+TV_weight_app = 0.01
+
+branch_parallel = 1
+plane_division = [4,2]
+
+compute_extra_metrics = 1
+run_nerf = 0
+render_batch_size = 8192
+bias_enable = 1
+white_bkgd = 1

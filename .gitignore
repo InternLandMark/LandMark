@@ -1,0 +1,12 @@
+__pycache__/
+*/__pycache__/
+data/
+log/
+wandb/
+runs/
+prof_dir/
+*.png
+*.log
+debug/
+
+app/.vscode/

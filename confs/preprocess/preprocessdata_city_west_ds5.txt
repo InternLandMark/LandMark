@@ -1,0 +1,19 @@
+dataroot = /cpfs01/shared/landmarks-viewer/train_data/base/
+datadir = ai_tower_all
+dataset_name = city
+expname = west_x5
+subfolder = [west]
+
+lb = [-2.4,-2.4,-0.05]
+ub = [2.4,2.4,0.55]
+
+
+train_near_far = [1e-1, 4]
+render_near_far = [2e-1, 4]
+downsample_train = 5
+
+white_bkgd = 1
+
+use_preprocessed_data = 1
+processed_data_type = file
+preprocessed_dir = /cpfs01/shared/landmarks-viewer/preprocessed_data/
