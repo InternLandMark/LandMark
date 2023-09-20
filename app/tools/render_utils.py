@@ -19,6 +19,7 @@ def renderer_fn(
     white_bg=True,
     is_train=False,
     device="cuda",
+    idxs=None,
 ):
     """
         The core function of the renderer.
@@ -40,12 +41,19 @@ def renderer_fn(
     N_rays_all = rays.shape[0]
     for chunk_idx in range(N_rays_all // chunk + int(N_rays_all % chunk > 0)):
         rays_chunk = rays[chunk_idx * chunk : (chunk_idx + 1) * chunk].to(device)
-        ret, extra_loss = gridnerf(
-            rays_chunk,
-            is_train=is_train,
-            white_bg=white_bg,
-            N_samples=N_samples,
-        )
+        if idxs is not None:
+            idxs_chunk = idxs[chunk_idx * chunk : (chunk_idx + 1) * chunk].to(device)
+            ret, extra_loss = gridnerf(
+                rays_chunk, is_train=is_train, white_bg=white_bg, N_samples=N_samples, idxs_chunk=idxs_chunk
+            )
+        else:
+            idxs_chunk = None
+            ret, extra_loss = gridnerf(
+                rays_chunk,
+                is_train=is_train,
+                white_bg=white_bg,
+                N_samples=N_samples,
+            )
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
@@ -78,8 +86,8 @@ def evaluation(
         args (tools.configs.ArgsConfig): Evaluation configs.
         renderer (function): Rendering function for computing RGB.
         savePath (str): Path where image, video, etc. information is stored.
-        N_vis (int): N images to visualize
-        prtx (str): prefix of finename.
+        N_vis (int): Control the visualization images.
+        prtx (str): Prefix of finename.
         N_samples (int): The number of sample points along a ray in total.
         white_bg (bool): Decide whether to render synthetic data on a white bkgd.
         compute_extra_metrics (bool): Decide whether to compute SSIM and LPIPS metrics.
@@ -97,7 +105,9 @@ def evaluation(
 
     PSNRs, rgb_maps, depth_maps = [], [], []
     ssims, l_alex, l_vgg = [], [], []
-    os.makedirs(savePath, exist_ok=True)
+
+    if savePath is not None:
+        os.makedirs(savePath, exist_ok=True)
 
     tqdm._instances.clear()
 
@@ -122,6 +132,10 @@ def evaluation(
                 rays_list = rays.split(rank_size)
                 rays = rays_list[args.rank]
 
+        if args.encode_app:
+            dummy_idxs = torch.zeros_like(rays[:, 0], dtype=torch.long).to(device)  # TODO need check
+        else:
+            dummy_idxs = None
         all_ret, _ = renderer(
             rays,
             gridnerf,
@@ -130,6 +144,7 @@ def evaluation(
             white_bg=white_bg,
             device=device,
             is_train=train_eval,
+            idxs=dummy_idxs,
         )
 
         rgb_map, depth_map = all_ret["rgb_map"], all_ret["depth_map"]
@@ -262,7 +277,7 @@ def evaluation(
             quality=10,
         )
 
-    if PSNRs and args.rank == 0:
+    if PSNRs and args.rank == 0 and savePath is not None:
         psnr = np.mean(np.asarray(PSNRs))
         if compute_extra_metrics:
             ssim = np.mean(np.asarray(ssims))
@@ -297,8 +312,8 @@ def evaluation_static(
         args (tools.configs.ArgsConfig): Evaluation configs.
         renderer (function): Rendering function for computing RGB.
         savePath (str): Path where image, video, etc. information is stored.
-        N_vis (int): N images to visualize
-        prtx (str): prefix of finename.
+        N_vis (int): Control the visualization images.
+        prtx (str): Prefix of finename.
         N_samples (int): The number of sample points along a ray in total.
         white_bg (bool): Decide whether to render synthetic data on a white bkgd.
         device (str): The device on which a tensor is or will be allocated.
@@ -381,11 +396,19 @@ def create_model(args):
     if args.branch_parallel:
         args.model_name += "BranchParallel"
 
+    if args.plane_parallel and args.ckpt_type == "sub":
+        args.model_name += "PlaneParallel"
+
+    if args.distributed:
+        if args.ckpt_type == "sub":
+            args.part = args.rank
+
     if args.ckpt == "auto":
         if args.branch_parallel or args.plane_parallel or args.channel_parallel:
             # normally set "auto" to load sub-ckpt for parallel-trained ckpt
             if args.ckpt_type == "sub":
                 args.ckpt = f"{args.logfolder}/{args.expname}-sub{args.rank}.th"
+                args.part = args.rank
             elif args.branch_parallel and args.ckpt_type == "part":
                 raise NotImplementedError
             else:

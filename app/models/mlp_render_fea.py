@@ -1,6 +1,7 @@
 import torch
 import torch.nn
-from tools.utils import positional_encoding
+
+from app.tools.utils import positional_encoding
 
 
 class MLPRender_Fea(torch.nn.Module):
@@ -13,11 +14,16 @@ class MLPRender_Fea(torch.nn.Module):
         feape (int): The number of positional encoding dimensions for the input features.
         featureC (int): The number of output channels.
         bias_enable (bool): Whether to enable bias.
+        encode_app (bool): Whether to enable encode_app.
     """
 
-    def __init__(self, inChanel, viewpe=6, feape=6, featureC=128, bias_enable=False):
+    def __init__(self, inChanel, viewpe=6, feape=6, featureC=128, bias_enable=False, encode_app=False):
         super().__init__()
-        self.in_mlpC = 2 * max(viewpe, 0) * 3 + 2 * feape * inChanel + 3 * (viewpe > -1) + inChanel
+        self.encode_app = encode_app
+        if self.encode_app:
+            self.in_mlpC = 2 * max(viewpe, 0) * 3 + 2 * feape * inChanel + 3 * (viewpe > -1) + inChanel + 48
+        else:
+            self.in_mlpC = 2 * max(viewpe, 0) * 3 + 2 * feape * inChanel + 3 * (viewpe > -1) + inChanel
         self.viewpe = viewpe
         self.feape = feape
 
@@ -35,7 +41,7 @@ class MLPRender_Fea(torch.nn.Module):
         if bias_enable:
             torch.nn.init.constant_(self.mlp[-1].bias, 0)
 
-    def forward(self, viewdirs, features):
+    def forward(self, viewdirs, features, latent=None):
         """
         Forward pass of the MLP Render Feature.
 
@@ -46,7 +52,10 @@ class MLPRender_Fea(torch.nn.Module):
         Returns:
             torch.Tensor: The output RGB tensor.
         """
-        indata = [features]
+        if self.encode_app and latent is not None:
+            indata = [features, latent]
+        else:
+            indata = [features]
         if self.viewpe > -1:
             indata += [viewdirs]
         if self.feape > 0:

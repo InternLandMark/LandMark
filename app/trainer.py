@@ -115,8 +115,8 @@ def train(args):
         lp_loss = lpips.LPIPS(net="vgg").to(args.device)
         ps = args.patch_size
 
-    if args.rank == 0 and not args.use_preprocessed_data:
-        allrays, allrgbs, trainingsampler = prep_sampler(enable_lpips, args, train_dataset)
+    if not args.use_preprocessed_data and args.rank == 0:
+        allrays, allrgbs, allidxs, trainingsampler = prep_sampler(enable_lpips, args, train_dataset)
         print("prepare sampler done", flush=True)
 
     pbar = tqdm(
@@ -149,46 +149,56 @@ def train(args):
         if args.use_preprocessed_data:
             if iteration % len(train_dataloader) == 0 or iteration == args.start_iters:
                 batch_iter = iter(train_dataloader)
-            rays, rgbs = next(batch_iter)
-            rays_train, rgb_train, = rays.to(
-                args.device
-            ), rgbs.to(args.device)
+            rays, rgbs, idxs = next(batch_iter)
+            rays_train, rgb_train, idxs_train = rays.to(args.device), rgbs.to(args.device), idxs.to(args.device)
             rays_train = rays_train.view(-1, 6)
             rgb_train = rgb_train.view(-1, 3)
+            idxs_train = idxs_train.view(rays_train.shape[0])
         else:
             if args.rank == 0:
                 if args.add_upsample and iteration == args.add_upsample:
                     train_dataset, test_dataset = prep_dataset(enable_lpips, args)
-                    allrays, allrgbs, trainingsampler = prep_sampler(enable_lpips, args, train_dataset)
+                    allrays, allrgbs, allidxs, trainingsampler = prep_sampler(enable_lpips, args, train_dataset)
                     print("upsample training dataset by x2")
 
                 if args.add_lpips > 0 and iteration == args.add_lpips:
                     enable_lpips = True
                     train_dataset, test_dataset = prep_dataset(enable_lpips, args)
-                    allrays, allrgbs, trainingsampler = prep_sampler(enable_lpips, args, train_dataset)
+                    allrays, allrgbs, allidxs, trainingsampler = prep_sampler(enable_lpips, args, train_dataset)
                     print("reformat dataset with patch samples")
 
                 ray_idx = trainingsampler.nextids()
-                rays_train, rgb_train = (
+                rays_train, rgb_train, idxs_train = (
                     allrays[ray_idx].to(args.device),
                     allrgbs[ray_idx].to(args.device),
+                    allidxs[ray_idx].to(args.device),
                 )
             else:
                 if enable_lpips or (args.add_lpips > 0 and iteration == args.add_lpips):
                     enable_lpips = True
                     rays_train = torch.zeros([ps * ps, 6], dtype=torch.float32, device=args.device)
                     rgb_train = torch.zeros([ps * ps, 3], dtype=torch.float32, device=args.device)
+                    idxs_train = torch.zeros([ps * ps], dtype=torch.float32, device=args.device)
                 else:
                     rays_train = torch.zeros([args.batch_size, 6], dtype=torch.float32, device=args.device)
                     rgb_train = torch.zeros([args.batch_size, 3], dtype=torch.float32, device=args.device)
+                    idxs_train = torch.zeros([args.batch_size], dtype=torch.float32, device=args.device)
 
             if args.distributed:
                 dist.broadcast(rays_train, src=0)
                 dist.broadcast(rgb_train, src=0)
+                dist.broadcast(idxs_train, src=0)
 
             if args.DDP:
-                rays_train = torch.chunk(rays_train, args.world_size, dim=0)[args.rank]
-                rgb_train = torch.chunk(rgb_train, args.world_size, dim=0)[args.rank]
+                if args.model_parallel_and_DDP:
+                    num_replicas = args.num_mp_groups
+                    dp_rank = args.dp_rank
+                else:
+                    num_replicas = args.world_size
+                    dp_rank = args.rank
+                rays_train = torch.chunk(rays_train, num_replicas, dim=0)[dp_rank]
+                rgb_train = torch.chunk(rgb_train, num_replicas, dim=0)[dp_rank]
+                idxs_train = torch.chunk(idxs_train, num_replicas, dim=0)[dp_rank]
 
         if args.add_distort > 0 and iteration == args.add_distort:
             enable_distort = True
@@ -196,6 +206,10 @@ def train(args):
         if enable_lpips:
             rays_train = rays_train.view(-1, 6)
             rgb_train = rgb_train.view(-1, 3)
+            idxs_train = idxs_train.view(rays_train.shape[0])
+
+        if not args.encode_app:
+            idxs_train = None
 
         all_ret, extra_loss = renderer(
             rays_train,
@@ -205,6 +219,7 @@ def train(args):
             white_bg=white_bg,
             device=args.device,
             is_train=True,
+            idxs=idxs_train,
         )
         rgb_map = all_ret["rgb_map"]
         loss = torch.mean((rgb_map - rgb_train) ** 2)
@@ -472,14 +487,17 @@ def train(args):
             optimizer = torch.optim.Adam(grad_vars, betas=(0.9, 0.99))
 
     if args.DDP:
-        if args.plane_parallel or args.branch_parallel:
-            model_division = args.plane_division
-            parallel_degree = model_division[0] * model_division[1]
+        if args.plane_parallel or args.branch_parallel or args.channel_parallel:
+            if args.channel_parallel:
+                parallel_degree = args.channel_parallel_size
+            else:
+                model_division = args.plane_division
+                parallel_degree = model_division[0] * model_division[1]
             if args.rank < parallel_degree:
                 train_model.save(f"{logfolder}/{args.expname}-sub{args.rank}.th")
             if args.distributed:
                 dist.barrier()
-            if args.rank < parallel_degree:
+            if args.rank == 0:
                 train_model.merge_ckpts(logfolder)
         else:
             if args.rank == 0:
@@ -503,7 +521,7 @@ def train(args):
         args,
         renderer,
         folder,
-        N_vis=-1,
+        N_vis=args.N_vis,
         N_samples=-1,
         white_bg=white_bg,
         device=args.device,
@@ -511,6 +529,7 @@ def train(args):
     )
     all_psnr = np.mean(psnrs_test)
     print(f"======> {args.expname} test all psnr: {all_psnr} <========================")
+    return all_psnr
 
 
 if __name__ == "__main__":
@@ -554,16 +573,18 @@ if __name__ == "__main__":
         print("Training with a single process on 1 GPUs.")
     assert init_args.rank >= 0
 
-    check_args(init_args)
+    if init_args.branch_parallel or init_args.plane_parallel:
+        plane_division = init_args.plane_division
+        init_args.model_parallel_degree = plane_division[0] * plane_division[1]
+    elif init_args.channel_parallel:
+        init_args.model_parallel_degree = init_args.channel_parallel_size
 
     if init_args.model_parallel_and_DDP:
         init_args.DDP = True
-        if init_args.branch_parallel or init_args.plane_parallel:
-            plane_division = init_args.plane_division
-            model_parallel_degree = plane_division[0] * plane_division[1]
-            init_args.num_mp_groups = int(init_args.world_size // model_parallel_degree)
-            init_args.dp_rank = init_args.rank // model_parallel_degree
+        init_args.num_mp_groups = int(init_args.world_size // init_args.model_parallel_degree)
+        init_args.dp_rank = init_args.rank // init_args.model_parallel_degree
+        init_comm_groups(model_parallel_degree=init_args.model_parallel_degree)
 
-        init_comm_groups(model_parallel_degree=model_parallel_degree)
+    check_args(init_args)
 
     train(init_args)

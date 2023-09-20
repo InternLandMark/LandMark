@@ -42,9 +42,8 @@ class CityDataset(BaseDataset):
         )
         poses, fnames, hwf, imgfolder = meta.values()
         N = len(poses)
-        test_idx = list(range(0, N, self.N_vis))
-        train_idx = [i for i in range(N) if i not in test_idx]
-        idxs = train_idx if self.split == "train" else test_idx
+        idxs = list(range(0, N))
+
         H, W, focal = hwf
 
         self.img_wh = [W, H]
@@ -56,10 +55,10 @@ class CityDataset(BaseDataset):
                 torch.meshgrid(torch.linspace(0, H - 1, H), torch.linspace(0, W - 1, W)),
                 -1,
             )
-            patchify = (
+            patches = (
                 coords.unfold(0, size=ps, step=ps).unfold(1, size=ps, step=ps).unfold(2, 2, 2)
             )  # slice image into patches
-            # patches = torch.reshape(patchify, [-1, ps, ps, 2])
+            patches = torch.reshape(patches, [-1, ps, ps, 2])
 
         for i in tqdm(idxs):
             pose = torch.FloatTensor(poses[i])
@@ -71,10 +70,16 @@ class CityDataset(BaseDataset):
             rays_o, rays_d = get_rays_with_directions(directions, pose)
 
             if self.lpips and self.split == "train":
-                self.all_rgbs, self.all_rays = patchify(img, rays_o, rays_d, H, W, ps=self.patch_size)
+                for coord in patches:
+                    coord = torch.reshape(coord, [-1, 2])
+                    inds = (coord[:, 0] * W + coord[:, 1]).long()
+                    self.all_rgbs += [img[inds]]
+                    self.all_rays += [torch.cat([rays_o, rays_d], 1)[inds]]
+                    self.all_idxs += [(torch.zeros(rays_d.shape[0]) + i)[inds]]
             else:
                 self.all_rgbs += [img]
                 self.all_rays += [torch.cat([rays_o, rays_d], 1)]
+                self.all_idxs += [(torch.zeros(rays_d.shape[0]) + i)]
 
         self.poses = torch.stack(self.poses, 0)
         print(
@@ -104,26 +109,27 @@ class CityDataset(BaseDataset):
         )
         poses, fnames, hwf, imgfolder = meta.values()
         N = len(poses)
-        test_idx = list(range(0, N, self.N_vis))
-        train_idx = [i for i in range(N) if i not in test_idx]
+        idxs = list(range(0, N))
 
         H, W, focal = hwf
         self.img_wh = [W, H]
         directions = get_ray_directions_blender(int(H), int(W), (focal, focal))
 
-        chunk_size = len(train_idx) // split_num  # split_num = 20
+        chunk_size = len(idxs) // split_num  # split_num = 20
         chunk_list = []
-        for i in range(0, len(train_idx), chunk_size):
-            chunk_list.append(train_idx[i : i + chunk_size])
+        for i in range(0, len(idxs), chunk_size):
+            chunk_list.append(idxs[i : i + chunk_size])
 
         assert not self.lpips
 
         rest_rays = []
         rest_rgbs = []
+        rest_idxs = []
         num = 0
         for partial_list in chunk_list:
             part_rgbs = []
             part_rays = []
+            part_idxs = []
             for i in partial_list:
                 pose = torch.FloatTensor(poses[i])
                 f_path = os.path.join(imgfolder, fnames[i])
@@ -135,9 +141,11 @@ class CityDataset(BaseDataset):
 
                 part_rgbs += [img]
                 part_rays += [torch.cat([rays_o, rays_d], 1)]
+                part_idxs += [torch.zeros(rays_d.shape[0]) + i]
 
             part_rays = torch.cat(part_rays, 0)
             part_rgbs = torch.cat(part_rgbs, 0)
+            part_idxs = torch.cat(part_idxs, 0)
 
             part_num = part_rays.shape[0]
             g = torch.Generator()
@@ -148,8 +156,9 @@ class CityDataset(BaseDataset):
                 batch_id = ids[curr : curr + batch_size]
                 rays = part_rays[batch_id]
                 rgbs = part_rgbs[batch_id]
+                idxs = part_idxs[batch_id]
                 if args.processed_data_type == "ceph":
-                    batch_data = torch.cat([rays, rgbs], dim=1).numpy().tobytes()
+                    batch_data = torch.cat([rays, rgbs, idxs], dim=1).numpy().tobytes()
                     num_str = str(num).zfill(10)
                     data_url = (
                         args.preprocessed_dir
@@ -180,18 +189,21 @@ class CityDataset(BaseDataset):
                     )
                     os.makedirs(outfolder, exist_ok=True)
                     outfile = outfolder + num_str + ".npz"
-                    np.savez(outfile, rays=rays.numpy(), rgbs=rgbs.numpy())
+                    np.savez(outfile, rays=rays.numpy(), rgbs=rgbs.numpy(), idxs=idxs.numpy())
                 curr += batch_size
                 num += 1
             if curr < part_num:
                 batch_id = ids[curr:part_num]
                 rays = part_rays[batch_id]
                 rgbs = part_rgbs[batch_id]
+                idxs = part_idxs[batch_id]
                 rest_rays.append(rays)
                 rest_rgbs.append(rgbs)
+                rest_idxs.append(idxs)
 
         rest_rays = torch.cat(rest_rays, 0)
         rest_rgbs = torch.cat(rest_rgbs, 0)
+        rest_idxs = torch.cat(rest_idxs, 0)
         rest_num = rest_rays.shape[0]
         g = torch.Generator()
         g.manual_seed(996007)
@@ -201,8 +213,9 @@ class CityDataset(BaseDataset):
             batch_id = ids[curr : curr + batch_size]
             rays = rest_rays[batch_id]
             rgbs = rest_rgbs[batch_id]
+            idxs = rest_idxs[batch_id]
             if args.processed_data_type == "ceph":
-                batch_data = torch.cat([rays, rgbs], dim=1).numpy().tobytes()
+                batch_data = torch.cat([rays, rgbs, idxs], dim=1).numpy().tobytes()
                 num_str = str(num).zfill(10)
                 data_url = (
                     args.preprocessed_dir
@@ -233,7 +246,7 @@ class CityDataset(BaseDataset):
                 )
                 os.makedirs(outfolder, exist_ok=True)
                 outfile = outfolder + num_str + ".npz"
-                np.savez(outfile, rays=rays.numpy(), rgbs=rgbs.numpy())
+                np.savez(outfile, rays=rays.numpy(), rgbs=rgbs.numpy(), idxs=idxs.numpy())
             curr += batch_size
             num += 1
 
@@ -286,23 +299,23 @@ class CityDataset(BaseDataset):
         )
         poses, fnames, hwf, imgfolder = meta.values()
         N = len(poses)
-        test_idx = list(range(0, N, self.N_vis))
-        train_idx = [i for i in range(N) if i not in test_idx]
+        idxs = list(range(0, N))
 
         H, W, focal = hwf
         self.img_wh = [W, H]
         directions = get_ray_directions_blender(int(H), int(W), (focal, focal))
 
-        chunk_size = len(train_idx) // args.world_size  # split_num = 20
+        chunk_size = len(idxs) // args.world_size  # split_num = 20
         chunk_list = []
-        for i in range(0, len(train_idx), chunk_size):
-            chunk_list.append(train_idx[i : i + chunk_size])
-        rest_list = train_idx[args.world_size * chunk_size : len(train_idx)]
+        for i in range(0, len(idxs), chunk_size):
+            chunk_list.append(idxs[i : i + chunk_size])
+        rest_list = idxs[args.world_size * chunk_size : len(idxs)]
         num = args.rank
 
         partial_list = chunk_list[args.rank]
         part_rgbs = []
         part_rays = []
+        part_idxs = []
         for i in partial_list:
             pose = torch.FloatTensor(poses[i])
             f_path = os.path.join(imgfolder, fnames[i])
@@ -314,9 +327,11 @@ class CityDataset(BaseDataset):
 
             part_rgbs += [img]
             part_rays += [torch.cat([rays_o, rays_d], 1)]
+            part_idxs += [torch.zeros(rays_d.shape[0]) + i]
 
         part_rays = torch.cat(part_rays, 0)
         part_rgbs = torch.cat(part_rgbs, 0)
+        part_idxs = torch.cat(part_idxs, 0)
 
         part_num = part_rays.shape[0]
         g = torch.Generator()
@@ -327,8 +342,9 @@ class CityDataset(BaseDataset):
             batch_id = ids[curr : curr + batch_size]
             rays = part_rays[batch_id]
             rgbs = part_rgbs[batch_id]
+            idxs = part_idxs[batch_id]
             if args.processed_data_type == "ceph":
-                batch_data = torch.cat([rays, rgbs], dim=1).numpy().tobytes()
+                batch_data = torch.cat([rays, rgbs, idxs], dim=1).numpy().tobytes()
                 num_str = str(num).zfill(10)
                 data_url = (
                     args.preprocessed_dir
@@ -359,7 +375,7 @@ class CityDataset(BaseDataset):
                 )
                 os.makedirs(outfolder, exist_ok=True)
                 outfile = outfolder + num_str + ".npz"
-                np.savez(outfile, rays=rays.numpy(), rgbs=rgbs.numpy())
+                np.savez(outfile, rays=rays.numpy(), rgbs=rgbs.numpy(), idxs=idxs.numpy())
                 if args.rank == 0:
                     print("finish writing: ", outfile)
             curr += batch_size
@@ -368,13 +384,17 @@ class CityDataset(BaseDataset):
             batch_id = ids[curr:part_num]
             rays = part_rays[batch_id]
             rgbs = part_rgbs[batch_id]
+            idxs = part_idxs[batch_id]
             rest_rays = rays
             rest_rgbs = rgbs
+            rest_idxs = idxs
 
         all_rest_rays = [None for i in range(args.world_size)]
         all_rest_rgbs = [None for i in range(args.world_size)]
+        all_rest_idxs = [None for i in range(args.world_size)]
         dist.all_gather_object(all_rest_rays, rest_rays)
         dist.all_gather_object(all_rest_rgbs, rest_rgbs)
+        dist.all_gather_object(all_rest_idxs, rest_idxs)
         if args.rank == 0:
             for i in rest_list:
                 pose = torch.FloatTensor(poses[i])
@@ -387,9 +407,11 @@ class CityDataset(BaseDataset):
 
                 all_rest_rgbs += [img]
                 all_rest_rays += [torch.cat([rays_o, rays_d], 1)]
+                all_rest_idxs += [torch.zeros(rays_d.shape[0]) + i]
 
             rest_rays = torch.cat(all_rest_rays, 0)
             rest_rgbs = torch.cat(all_rest_rgbs, 0)
+            rest_idxs = torch.cat(all_rest_idxs, 0)
 
             rest_num = rest_rays.shape[0]
             g = torch.Generator()
@@ -400,8 +422,9 @@ class CityDataset(BaseDataset):
                 batch_id = ids[curr : curr + batch_size]
                 rays = rest_rays[batch_id]
                 rgbs = rest_rgbs[batch_id]
+                idxs = rest_idxs[batch_id]
                 if args.processed_data_type == "ceph":
-                    batch_data = torch.cat([rays, rgbs], dim=1).numpy().tobytes()
+                    batch_data = torch.cat([rays, rgbs, idxs], dim=1).numpy().tobytes()
                     num_str = str(num).zfill(10)
                     data_url = (
                         args.preprocessed_dir
@@ -432,7 +455,7 @@ class CityDataset(BaseDataset):
                     )
                     os.makedirs(outfolder, exist_ok=True)
                     outfile = outfolder + num_str + ".npz"
-                    np.savez(outfile, rays=rays.numpy(), rgbs=rgbs.numpy())
+                    np.savez(outfile, rays=rays.numpy(), rgbs=rgbs.numpy(), idxs=idxs.numpy())
                     if args.rank == 0:
                         print("finish writing: ", outfile)
                 curr += batch_size

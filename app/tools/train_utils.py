@@ -196,10 +196,12 @@ def get_preprocessed_loader(args):
     dataset = PreprocessedDataset(filefolder, data_type, conf_path)
     if args.DDP:
         if args.model_parallel_and_DDP:
+            batch_size = batch_size // args.num_mp_groups
             sampler = DSampler(
                 dataset, num_replicas=args.num_mp_groups, rank=args.dp_rank, shuffle=True, seed=0, drop_last=False
             )
         else:
+            batch_size = batch_size // args.world_size
             sampler = DSampler(
                 dataset, num_replicas=args.world_size, rank=args.rank, shuffle=True, seed=0, drop_last=False
             )
@@ -211,21 +213,25 @@ def get_preprocessed_loader(args):
 
 def prep_sampler(enable_lpips, args, train_dataset):
     """Prepare rays sampler for training"""
-    allrays, allrgbs = train_dataset.all_rays, train_dataset.all_rgbs
+    allrays, allrgbs, allidxs = train_dataset.all_rays, train_dataset.all_rgbs, train_dataset.all_idxs
 
     if args.preload:
         print("preload to cuda")
         allrays = allrays.cuda()
         allrgbs = allrgbs.cuda()
+        allidxs = allidxs.cuda()
 
-    if args.DDP:
-        if enable_lpips:
-            trainingsampler = DistributedSampler(allrays.shape[0], 1, args.rank, args.world_size)
-        else:
-            trainingsampler = DistributedSampler(allrays.shape[0], args.batch_size, args.rank, args.world_size)
+    # if args.DDP:
+    #     if args.model_parallel_and_DDP:
+    #         num_replicas = args.num_mp_groups
+    #     else:
+    #         num_replicas = args.world_size
+    #     sample_batch = args.batch_size * num_replicas
+    # else:
+    #     sample_batch = args.batch_size
+
+    if enable_lpips:
+        trainingsampler = SimpleSampler(allrays.shape[0], 1)
     else:
-        if enable_lpips:
-            trainingsampler = SimpleSampler(allrays.shape[0], 1)
-        else:
-            trainingsampler = SimpleSampler(allrays.shape[0], args.batch_size)
-    return allrays, allrgbs, trainingsampler
+        trainingsampler = SimpleSampler(allrays.shape[0], args.batch_size)
+    return allrays, allrgbs, allidxs, trainingsampler

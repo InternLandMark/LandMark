@@ -12,7 +12,7 @@ from colmap_parsing_utils import (
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="convert colmap to transforms.json")
+    parser = argparse.ArgumentParser(description="convert colmap to transforms_train/test.json")
 
     parser.add_argument("--recon_dir", type=str, default="landmark/dataset/your_dataset/sparse/0")
     parser.add_argument("--output_dir", type=str, default="landmark/dataset/your_dataset")
@@ -78,24 +78,18 @@ def colmap_to_json(recon_dir, output_dir, holdout):
 
     if set(cam_id_to_camera.keys()) != {1}:
         raise RuntimeError("Only single camera shared for all images is supported.")
-    out = parse_colmap_camera_params(cam_id_to_camera[1])
 
-    out_test = out
+    out_train = parse_colmap_camera_params(cam_id_to_camera[1])
+    out_test = parse_colmap_camera_params(cam_id_to_camera[1])
 
+    frames_train = [f for i, f in enumerate(frames) if i % holdout != 0]
     frames_test = [f for i, f in enumerate(frames) if i % holdout == 0]
 
-    out["frames"] = frames
+    out_train["frames"] = frames_train
     out_test["frames"] = frames_test
 
-    applied_transform = np.eye(4)[:3, :]
-    applied_transform = applied_transform[np.array([1, 0, 2]), :]
-    applied_transform[2, :] *= -1
-
-    out["applied_transform"] = applied_transform.tolist()
-    out_test["applied_transform"] = applied_transform.tolist()
-
     with open(output_dir / "transforms_train.json", "w", encoding="utf-8") as f:
-        json.dump(out, f, indent=4)
+        json.dump(out_train, f, indent=4)
 
     with open(output_dir / "transforms_test.json", "w", encoding="utf-8") as f:
         json.dump(out_test, f, indent=4)

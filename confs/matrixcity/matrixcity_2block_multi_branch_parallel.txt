@@ -1,0 +1,58 @@
+dataroot = /cpfs01/shared/pjlab-lingjun-landmarks/data/citymatrix/small_city/new_high/reconstruction
+datadir = block_1+2
+expname = matrix_city_block_1+2_branch_parallel
+dataset_name = matrixcity
+resMode = [1,2,4]
+ndims = 1
+
+nonlinear_density=True
+
+lb=[-1.0378e+01, -7.4430e+00, -1.1921e-07]
+ub=[1.2078e+00,  2.4078e+00,  9.0000e-01]
+
+add_nerf = 40000
+
+basedir = ./log
+
+train_near_far=[0.6, 3.5]
+
+downsample_train = 1
+
+batch_size = 8192
+
+N_voxel_init  = 2097156    # 128**3
+N_voxel_final = 125000000  # 500**3
+
+upsamp_list = [2000,3000,4000,5500,7000]
+update_AlphaMask_list = [2000,4000,8000,10000]
+
+lr_decay_iters = 50000
+n_iters = 50000
+
+N_vis = 5
+vis_every = 5000
+
+n_lamb_sigma = [16,16,16]
+n_lamb_sh    = [48,48,48]
+
+fea2denseAct = relu
+shadingMode = MLP_Fea
+
+view_pe = 2
+fea_pe = 2
+
+L1_weight_inital = 8e-5
+L1_weight_rest = 4e-5
+rm_weight_mask_thre = 1e-4
+
+TV_weight_density = 0.1
+TV_weight_app = 0.01
+
+branch_parallel = 1
+plane_division = [2,2]
+
+compute_extra_metrics = 1
+run_nerf = 0
+bias_enable = 1
+white_bkgd = 1
+sampling_opt = 0

@@ -213,7 +213,7 @@ def check_args(args):
         assert args.distributed
     plane_division = args.plane_division
     if args.model_parallel_and_DDP:
-        assert args.use_preprocessed_data
+        # assert args.use_preprocessed_data
         assert args.branch_parallel or args.channel_parallel or args.plane_parallel
         if args.plane_parallel or args.branch_parallel:
             assert args.world_size % (plane_division[0] * plane_division[1]) == 0
@@ -227,3 +227,11 @@ def check_args(args):
     if args.use_preprocessed_data:
         assert args.add_lpips == -1
         assert args.batch_size % 8192 == 0
+        if args.DDP:
+            if args.model_parallel_and_DDP:
+                assert (args.batch_size // 8192) % args.num_mp_groups == 0
+            else:
+                assert (args.batch_size // 8192) % args.world_size == 0
+
+    if args.DDP:
+        assert args.add_lpips == -1, "Do not support lpips in DDP mode"

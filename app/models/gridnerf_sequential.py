@@ -3,9 +3,10 @@ import numpy as np
 import torch
 import torch.nn
 import torch.nn.functional as F
-from tools.dataloader.ray_utils import sample_pdf
-from tools.utils import TVLoss, raw2alpha, st
 from torch_efficient_distloss import eff_distloss
+
+from app.tools.dataloader.ray_utils import sample_pdf
+from app.tools.utils import TVLoss, raw2alpha, st
 
 from .alpha_mask import AlphaGridMask
 from .mlp_render_fea import MLPRender_Fea
@@ -118,13 +119,16 @@ class GridBaseSequential(torch.nn.Module):
         self.fea_pe = fea_pe
         self.featureC = featureC
 
-        self.renderModule = MLPRender_Fea(self.app_dim, view_pe, fea_pe, featureC, args.bias_enable).to(device)
+        self.renderModule = MLPRender_Fea(
+            self.app_dim, view_pe, fea_pe, featureC, args.bias_enable, args.encode_app
+        ).to(device)
 
         self.run_nerf = args.run_nerf
         if self.run_nerf:
             self.init_nerf(args)
 
         self.n_importance = args.n_importance
+        self.alpha_mask_filter_thre = args.alpha_mask_filter_thre
 
     def init_nerf(self, args):
         """
@@ -236,7 +240,7 @@ class GridBaseSequential(torch.nn.Module):
             )
         self.load_state_dict(ckpt["state_dict"], strict=False)
 
-    def sample_ray(self, rays_o, rays_d, is_train=True, N_samples=-1):
+    def sample_ray(self, rays_o, rays_d, is_train=True, N_samples=-1, idxs=None):
         """
         Sample N_samples number points on a ray. If is_train is True, use segmented \
         random sampling. Otherwise use uniform sampling.
@@ -267,11 +271,15 @@ class GridBaseSequential(torch.nn.Module):
         step = stepsize * rng.to(rays_o.device)
         interpx = t_min[..., None] + step
         rays_pts = rays_o[..., None, :] + rays_d[..., None, :] * interpx[..., None]
+        if idxs is not None:
+            rays_pts_idxs = idxs.unsqueeze(1).repeat(1, rays_pts.shape[1]).type(torch.long)
+        else:
+            rays_pts_idxs = None
         aabb = self.aabb.clone()
         mask_outbbox = ((aabb[0] > rays_pts) | (rays_pts > aabb[1])).any(dim=-1)
-        return rays_pts, interpx, ~mask_outbbox
+        return rays_pts, rays_pts_idxs, interpx, ~mask_outbbox
 
-    def sample_ray_within_hull(self, rays_o, rays_d, is_train=True, N_samples=-1):
+    def sample_ray_within_hull(self, rays_o, rays_d, is_train=True, N_samples=-1, idxs=None):
         """
         Samples points along the rays within the bounding box.
 
@@ -301,9 +309,13 @@ class GridBaseSequential(torch.nn.Module):
             z_vals = lower + (upper - lower) * t_rand
 
         rays_pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]
+        if idxs is not None:
+            rays_pts_idxs = idxs.unsqueeze(1).repeat(1, rays_pts.shape[1]).type(torch.long)
+        else:
+            rays_pts_idxs = None
         aabb = self.aabb
         mask_outbbox = ((aabb[0] > rays_pts) | (rays_pts > aabb[1])).any(dim=-1)
-        return rays_pts, z_vals, ~mask_outbbox
+        return rays_pts, rays_pts_idxs, z_vals, ~mask_outbbox
 
     @torch.no_grad()
     def getDenseAlpha(self, gridSize=None):
@@ -413,26 +425,40 @@ class GridBaseSequential(torch.nn.Module):
         alpha = 1 - torch.exp(-sigma * length).view(xyz_locs.shape[:-1])
         return alpha
 
+    def compute_app_latent(self, xyzb_sampled, app_mask, app_code):
+        if self.args.encode_app and app_code is not None:
+            fake_xyzb_sampled_idxs = (
+                torch.ones(xyzb_sampled.shape[:-1], dtype=torch.long, device=self.device) * app_code.long()
+            )
+            app_latent = self.embedding_app(fake_xyzb_sampled_idxs[app_mask])
+        else:
+            app_latent = None
+        return app_latent
+
     def forward(
         self,
         rays_chunk,
+        app_code=None,
         white_bg=True,
         is_train=False,
         N_samples=-1,
+        idxs_chunk=None,
     ):
         rays_o = rays_chunk[:, :3]
         rays_d = viewdirs = rays_chunk[:, 3:6]
 
         if is_train or (not is_train and not self.sampling_opt):
             # dense sample
-            xyz_sampled, z_vals, ray_valid = self.sample_ray(rays_o, viewdirs, is_train=is_train, N_samples=N_samples)
+            xyz_sampled, xyz_sampled_idxs, z_vals, ray_valid = self.sample_ray(
+                rays_o, viewdirs, is_train=is_train, N_samples=N_samples, idxs=idxs_chunk
+            )
 
             dists = torch.cat((z_vals[:, 1:] - z_vals[:, :-1], torch.zeros_like(z_vals[:, :1])), dim=-1)
             viewdirs = viewdirs.view(-1, 1, 3).expand(xyz_sampled.shape)
 
             if self.alphaMask is not None:
                 alphas = self.alphaMask.sample_alpha(xyz_sampled[ray_valid])
-                alpha_mask = alphas > 0
+                alpha_mask = alphas > self.alpha_mask_filter_thre
                 ray_invalid = ~ray_valid
                 ray_invalid[ray_valid] |= ~alpha_mask
                 ray_valid = ~ray_invalid
@@ -453,7 +479,14 @@ class GridBaseSequential(torch.nn.Module):
 
             if app_mask.any():
                 app_features = self.compute_appfeature(xyz_sampled[app_mask])
-                valid_rgbs = self.renderModule(viewdirs[app_mask], app_features)  # pylint: disable=E1102
+                if self.args.encode_app:
+                    if xyz_sampled_idxs is None:
+                        app_latent = self.compute_app_latent(xyz_sampled, app_mask, app_code)
+                    else:
+                        app_latent = self.embedding_app(xyz_sampled_idxs[app_mask])
+                else:
+                    app_latent = None
+                valid_rgbs = self.renderModule(viewdirs[app_mask], app_features, app_latent)  # pylint: disable=E1102
                 rgb[app_mask] = valid_rgbs
 
             acc_map = torch.sum(weight, -1)
@@ -491,8 +524,8 @@ class GridBaseSequential(torch.nn.Module):
 
             # importance sample for grid branch (optional)
 
-            xyz_sampled, z_vals, ray_valid = self.sample_ray_within_hull(
-                rays_o, viewdirs, is_train=is_train, N_samples=self.n_importance
+            xyz_sampled, xyz_sampled_idxs, z_vals, ray_valid = self.sample_ray_within_hull(
+                rays_o, viewdirs, is_train=is_train, N_samples=self.n_importance, idxs=idxs_chunk
             )
             dists = torch.cat(
                 (z_vals[:, 1:] - z_vals[:, :-1], torch.zeros_like(z_vals[:, :1])),
@@ -501,7 +534,7 @@ class GridBaseSequential(torch.nn.Module):
             viewdirs = viewdirs.view(-1, 1, 3).expand(xyz_sampled.shape)
             if self.alphaMask is not None:
                 alphas = self.alphaMask.sample_alpha(xyz_sampled[ray_valid])
-                alpha_mask = alphas > 0
+                alpha_mask = alphas > self.alpha_mask_filter_thre
                 ray_invalid = ~ray_valid
                 ray_invalid[ray_valid] |= ~alpha_mask
                 ray_valid = ~ray_invalid
@@ -519,7 +552,14 @@ class GridBaseSequential(torch.nn.Module):
             app_mask = weight > self.rayMarch_weight_thres
             if app_mask.any():
                 app_features = self.compute_appfeature(xyz_sampled[app_mask])
-                valid_rgbs = self.renderModule(viewdirs[app_mask], app_features)  # pylint: disable=E1102
+                if self.args.encode_app:
+                    if xyz_sampled_idxs is None:
+                        app_latent = self.compute_app_latent(xyz_sampled, app_mask, app_code)
+                    else:
+                        app_latent = self.embedding_app(xyz_sampled_idxs[app_mask])
+                else:
+                    app_latent = None
+                valid_rgbs = self.renderModule(viewdirs[app_mask], app_features, app_latent)  # pylint: disable=E1102
                 rgb[app_mask] = valid_rgbs
             acc_map = torch.sum(weight, -1)
             rgb_map = torch.sum(weight[..., None] * rgb, -2)
@@ -562,6 +602,12 @@ class GridBaseSequential(torch.nn.Module):
                 xyz_sampled = (
                     rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]
                 )  # [N_rays, N_samples, 3]
+                if self.args.encode_app:
+                    xyz_sampled_idxs = (
+                        idxs_chunk.unsqueeze(1).repeat(1, xyz_sampled.shape[1], 1).view(-1, 1).type(torch.long)
+                    )
+                else:
+                    xyz_sampled_idxs = None
                 sigma_feature, den_feat = self.compute_densityfeature(
                     self.normalize_coord(xyz_sampled).view(-1, 3), return_feat=True
                 )
@@ -573,7 +619,13 @@ class GridBaseSequential(torch.nn.Module):
                     dim=-1,
                 )
                 viewdirs = rays_d.view(-1, 1, 3).expand(xyz_sampled.shape)
-                extras = self.nerf(xyz_sampled, viewdirs, den_feat, app_feat, dists)  # pylint: disable=E1102
+                if self.args.encode_app:
+                    app_latent = self.embedding_app(xyz_sampled_idxs).view(-1, 48)
+                else:
+                    app_latent = None
+                extras = self.nerf(  # pylint: disable=E1102
+                    xyz_sampled, viewdirs, den_feat, app_feat, app_latent, dists
+                )
                 depth_map_nerf = torch.sum(extras["weights"] * z_vals, -1)
 
                 if self.residnerf:
@@ -625,6 +677,8 @@ class GridNeRF(GridBaseSequential):
         self.basis_mat = torch.nn.Linear(sum(self.app_n_comp) * len(self.resMode), self.app_dim, bias=False).to(device)
         if self.nonlinear_density:
             self.basis_den = torch.nn.Linear(sum(self.density_n_comp) * len(self.resMode), 1, bias=False).to(device)
+        if self.args.encode_app:
+            self.embedding_app = torch.nn.Embedding(11500, 48).to(device)  # (N, ch), N: total num of imgs in dataset
 
     def init_one_svd(self, n_component, gridSize, scale, device):
         """
@@ -710,6 +764,8 @@ class GridNeRF(GridBaseSequential):
             {"params": self.app_plane, "lr": lr_init_spatial},
             {"params": self.basis_mat.parameters(), "lr": lr_init_network},
         ]
+        if self.args.encode_app:
+            grad_vars += [{"params": self.embedding_app.parameters(), "lr": lr_init_network}]
         if self.nonlinear_density:
             grad_vars += [{"params": self.basis_den.parameters(), "lr": lr_init_network}]
         if isinstance(self.renderModule, torch.nn.Module):

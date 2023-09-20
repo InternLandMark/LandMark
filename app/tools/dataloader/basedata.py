@@ -158,12 +158,15 @@ class BaseDataset(Dataset):
         if not self.is_stack:
             self.all_rays = torch.cat(self.all_rays, 0)
             self.all_rgbs = torch.cat(self.all_rgbs, 0)
+            self.all_idxs = torch.cat(self.all_idxs, 0)
         elif self.lpips and self.split == "train":
             self.all_rays = torch.stack(self.all_rays, 0)
             self.all_rgbs = torch.stack(self.all_rgbs, 0)
+            self.all_idxs = torch.stack(self.all_idxs, 0)
         else:
             self.all_rays = torch.stack(self.all_rays, 0)
             self.all_rgbs = torch.stack(self.all_rgbs, 0).reshape(-1, *self.img_wh[::-1], 3)
+            self.all_idxs = torch.stack(self.all_idxs, 0)
 
     def __len__(self):
         return len(self.all_rgbs)

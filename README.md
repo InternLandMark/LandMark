@@ -1,7 +1,7 @@
 <p align="center">
     <img src="https://img.shields.io/badge/Trainer-Ready-green"/>
     <img src="https://img.shields.io/badge/Renderer-Ready-green"/>
-    <img src="https://img.shields.io/badge/Framework-Developing-blue"/>
+    <img src="https://img.shields.io/badge/Framework-Ready-green"/>
     <img src="https://img.shields.io/badge/Documentation-Preview-purple"/>
     <img src="https://img.shields.io/badge/License-MIT-orange"/>
 </p>
@@ -53,6 +53,12 @@
     ✍️PaperPage
     </font>
     </a>
+    |
+    <a href="https://city-super.github.io/matrixcity/">
+    <font size="4">
+    🏬MatrixCity
+    </font>
+    </a>
 </p>
 
 # 💻 About
@@ -67,6 +73,8 @@ Including:
     - Beyond rendering, we showcased layout adjustment such as removing or adding a building, and scene stylization with alternative appearance such as changes of lighting and seasons.
 - Training, rendering integrated system:
     - We delivered a system covering algorithms, operators, computing systems, which serves as a solid foundation for the training, rendering and application of real-world 3D large models.
+- Distributed rendering system:
+    - For real-time rendering of large scale GridNeRF model.
 
 And now it's possible to train and render with your own LandMark models and enjoy your creativity.<br>
 Your likes and contributions to the community are exactly what we need.
@@ -81,7 +89,11 @@ The LandMark supports plenty of features at present:
 - GridNeRF Sequential Model Rendering
 - Pytorch DDP both on training and rendering
 
+- MatrixCity Datasets Supports
+- Real-time Distributed Rendering System
+
 It's highly recommended to read the [DOCUMENTATION](https://internlandmark.github.io/LandMark_Documentation/) about the implementations of our parallel acceleration strategies.
+
 # 🚀 Quickstart
 ## Prerequisites
 You must have a NVIDIA video card with [CUDA](https://docs.nvidia.com/cuda/cuda-quick-start-guide/index.html) installed on the system.<br>
@@ -107,14 +119,14 @@ pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 --extra-index-url http
 ```
 This library has been tested with version `11.6` of CUDA.
 ## Dependencies
-We  provide `requirement.txt` for setting the environment easily.
+We  provide `requirements.txt` for setting the environment easily.
 ```
-pip install -r requirement.txt
+pip install -r requirements.txt
 ```
 ## Prepare Dataset
-Due to `confidentiality` reasons, we are sorry that we are unable to release the datasets.<br>
-Any questions about processing your own datasets are welcome from raising a [issue](https://github.com/InternLandMark/LandMark/issues).<br>
-
+For confidential reason, the native datasets we use as shown above will not be released.<br>
+For ideal reproduction result, [MatrixCity](https://city-super.github.io/matrixcity/) dataset is highly recommanded.<br>
+We've prepared tuned configuration files and dedicated dataloader for the MatrixCity dataset.<br>
 Large scale scenes captured from the real world are most suitable for our method.<br>
 We recommend using dataset of a building, a well-known LandMark and even a small town.<br>
 Prepare about 250 ~ 300 images of the reconstruction target. Make sure enough overlapping.<br>
@@ -133,7 +145,7 @@ Then transfer the poses data using commands below:
 ```
 python app/tools/colmap2nerf.py --recon_dir data/your_dataset/sparse/0 --output_dir data/your_dataset
 ```
-A `transforms_tain.json` and a `transforms_tain.json` files will be generated in the `your_dataset/` folder.<br>
+A `transforms_train.json` and a `transforms_test.json` files will be generated in the `your_dataset/` folder.<br>
 Referring to the `app/tools/config_parser.py` and the `app/tools/dataloader/city_dataset.py` for help.<br>
 ## Set Arguments
 We provide a configuration file `confs/city.txt` as an example to help you initialize your experiments.<br>
@@ -175,9 +187,11 @@ The rendering results will be save in `LandMark/log/your_expname/imgs_test_all` 
 - app/
     - models/ - Contains sequential and parallel implementations of GridNeRF models
     - tools/ - Contains dataloaders, train/render utilities
+    - tests/ - Contains scripts for integerity test
     - trainer.py - Manage running process for training
     - renderer.py - Manage running process for training
 - confs/ - Contains configuration files for experiments
+- dist_renders - Code, introduction, scripts about distributed rendering system
 - requirements.txt - Environment configuration file for pip
 
 ## Pytorch Distributed Data Parallel Support
@@ -205,6 +219,23 @@ To render with the Parallel model after training, using the command as the seque
 ```
 python app/renderer.py --config confs/city_multi_branch_parallel.txt --ckpt=log/your_expname/your_expname.th
 ```
+## MatrixCity Dataset
+Fully supports the brilliant MatrixCity dataset. Dedicated files are given for block_1 and block_2 in `confs/matrixcity`. <br>
+It's recommended to download the datases from [OpenXLab](https://openxlab.org.cn/datasets/bdaibdai/MatrixCity).<br>
+For single GPU trainng, simply use:
+```
+python app/trainer.py --config confs/matrixcity_2block_multi.txt
+```
+For multi GPU DDP training:
+```
+python -m torch.distributed.launch --nproc_per_node=number_of_GPUs app/trainer.py --config confs/matrixcity_2block_multi.txt
+```
+Other parallel methods are also available:
+```
+python -m torch.distributed.launch --nproc_per_node=number_of_GPUs app/trainer.py --config confs/matrixcity_2block_multi_branch_parallel.txt
+```
+## Real-Time Distributed Rendering System
+Large-scale real-time distributed rendering system which supports over 100 km^2 scene and over 30 frames per second. Read [dist_render/README.md](./dist_render/README.md) for more detailes
 # 🤝 Authors
 The main work comes from the LandMark Team, Shanghai AI Laboratory.<br>
 

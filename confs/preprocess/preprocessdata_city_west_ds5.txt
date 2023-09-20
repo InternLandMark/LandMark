@@ -1,4 +1,4 @@
-dataroot = /cpfs01/shared/landmarks-viewer/train_data/base/
+dataroot = /cpfs01/shared/pjlab-lingjun-landmarks/data/zhita
 datadir = ai_tower_all
 dataset_name = city
 expname = west_x5
@@ -16,4 +16,4 @@ white_bkgd = 1
 
 use_preprocessed_data = 1
 processed_data_type = file
-preprocessed_dir = /cpfs01/shared/landmarks-viewer/preprocessed_data/
+preprocessed_dir = /cpfs01/shared/pjlab-lingjun-landmarks/preprocessed_data/

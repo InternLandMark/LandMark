@@ -1,7 +1,8 @@
 import torch
 import torch.nn.functional as F
-from tools.utils import positional_encoding
 from torch import nn
+
+from app.tools.utils import positional_encoding
 
 
 def raw2alpha(raw, dists, act_fn=F.relu):
@@ -65,6 +66,7 @@ class NeRF(torch.nn.Module):
         self.D = args.nerf_D
         self.D_a = args.nerf_D_a
         self.W = args.nerf_W
+        self.encode_app = args.encode_app
 
         self.init_module_v0()
 
@@ -83,9 +85,16 @@ class NeRF(torch.nn.Module):
             + [torch.nn.Linear(W, W) if i not in self.skips else torch.nn.Linear(W + input_ch, W) for i in range(D - 1)]
         )
 
-        self.views_linears = nn.ModuleList(
-            [torch.nn.Linear(input_ch_views + W, W // 2)] + [torch.nn.Linear(W // 2, W // 2) for i in range(D_a - 1)]
-        )
+        if self.encode_app:
+            self.views_linears = nn.ModuleList(
+                [torch.nn.Linear(input_ch_views + W + 48, W // 2)]
+                + [torch.nn.Linear(W // 2, W // 2) for i in range(D_a - 1)]
+            )
+        else:
+            self.views_linears = nn.ModuleList(
+                [torch.nn.Linear(input_ch_views + W, W // 2)]
+                + [torch.nn.Linear(W // 2, W // 2) for i in range(D_a - 1)]
+            )
 
         if self.use_viewdirs:
             self.feature_linear = nn.Linear(W, W)
@@ -94,7 +103,9 @@ class NeRF(torch.nn.Module):
         else:
             self.output_linear = nn.Linear(W, 4)
 
-    def forward(self, pts, viewdir=None, den_feats=None, app_feats=None, dists=None):  # gridfeat store in dict format
+    def forward(
+        self, pts, viewdir=None, den_feats=None, app_feats=None, app_latent=None, dists=None
+    ):  # gridfeat store in dict format
         """
         Forward pass of the NeRF branch.
 
@@ -126,7 +137,10 @@ class NeRF(torch.nn.Module):
             alpha = self.alpha_linear(h)
             feature = self.feature_linear(h)
             view_concat = [feature, viewdir, viewdir_pe]
-            view_concat += [app_feats]
+            if self.encode_app:
+                view_concat += [app_feats, app_latent]
+            else:
+                view_concat += [app_feats]
             h = torch.cat(view_concat, -1)
             for i, _ in enumerate(self.views_linears):
                 h = F.relu(self.views_linears[i](h))
@@ -146,7 +160,7 @@ class NeRFParallel(NeRF):
     def __init__(self, args, den_n_comp, app_n_comp, nfreqs=None):  # pure frequency embed
         super().__init__(args, den_n_comp, app_n_comp, nfreqs)
 
-    def forward(self, pts, viewdir=None, den_feats=None, app_feats=None, dists=None):
+    def forward(self, pts, viewdir=None, den_feats=None, app_feats=None, app_latent=None, dists=None):
         """
         Forward pass of the NeRF branch.
 
@@ -175,7 +189,10 @@ class NeRFParallel(NeRF):
             alpha = self.alpha_linear(h)
             feature = self.feature_linear(h)
             view_concat = [feature, viewdir, viewdir_pe]
-            view_concat += [app_feats]
+            if self.encode_app:
+                view_concat += [app_feats, app_latent]
+            else:
+                view_concat += [app_feats]
             h = torch.cat(view_concat, -1)
             for i, _ in enumerate(self.views_linears):
                 h = F.relu(self.views_linears[i](h))

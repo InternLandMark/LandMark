@@ -40,10 +40,10 @@ class PreprocessedDataset(Dataset):
             data_tensor = torch.from_numpy(data_np)
             rays = data_tensor[:, :6].data
             rgbs = data_tensor[:, 6:9].data
-            # idxs = data_tensor[:, 9:].data
+            idxs = data_tensor[:, 9:].data
         else:
             npzfile = np.load(self.file_folder + str(idx).zfill(10) + ".npz")
             rays = torch.from_numpy(npzfile["rays"])
             rgbs = torch.from_numpy(npzfile["rgbs"])
-            # idxs = torch.from_numpy(npzfile["idxs"])
-        return rays, rgbs
+            idxs = torch.from_numpy(npzfile["idxs"])
+        return rays, rgbs, idxs

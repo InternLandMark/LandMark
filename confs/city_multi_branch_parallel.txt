@@ -1,13 +1,13 @@
 
 datadir = ai_tower_all
 subfolder = [west]
-dataroot = /cpfs01/shared/landmarks-viewer/train_data/base/
+dataroot = /cpfs01/shared/pjlab-lingjun-landmarks/data/zhita
 expname = west_x5_resMode1-2-4_branch_parallel
 downsample_train = 5
 dataset_name = city
 model_name = GridNeRF
 resMode = [1,2,4]
-ndim = 1
+ndims = 1
 sampling_opt = 0
 
 lb = [-3,-3,-0.1]

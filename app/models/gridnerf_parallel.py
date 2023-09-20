@@ -4,10 +4,11 @@ import torch
 import torch.distributed as dist
 import torch.nn
 import torch.nn.functional as F
-from tools.dataloader.ray_utils import sample_pdf
-from tools.utils import TVLoss, raw2alpha, st
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch_efficient_distloss import eff_distloss
+
+from app.tools.dataloader.ray_utils import sample_pdf
+from app.tools.utils import TVLoss, raw2alpha, st
 
 from .alpha_mask import AlphaGridMask
 from .mlp_render_fea import MLPRender_Fea
@@ -40,7 +41,7 @@ class GridBaseParallel(torch.nn.Module):
         use_plane_split (bool): Whether to split plane, usually set to False with channel parallel.
         args (ArgsConfig): Args instance that holds the config setting.
         group (torch.distributed.ProcessGroup): Distributed communication group that the model on \
-            current rank belongs to.
+            current part belongs to.
         is_train (bool): Distinguish between training and rendering in order to init modules correctly.
     """
 
@@ -120,17 +121,20 @@ class GridBaseParallel(torch.nn.Module):
         self.fea_pe = fea_pe
         self.featureC = featureC
 
-        self.renderModule = MLPRender_Fea(self.app_dim, view_pe, fea_pe, featureC, args.bias_enable).to(device)
+        self.renderModule = MLPRender_Fea(
+            self.app_dim, view_pe, fea_pe, featureC, args.bias_enable, args.encode_app
+        ).to(device)
 
         self.run_nerf = args.run_nerf
         if self.run_nerf:
             self.init_nerf(args)
 
         self.n_importance = args.n_importance
+        self.alpha_mask_filter_thre = args.alpha_mask_filter_thre
 
         self.use_plane_split = use_plane_split
         if self.use_plane_split and self.is_train:
-            self.renderModule = DDP(self.renderModule, device_ids=[self.args.local_rank])
+            self.renderModule = DDP(self.renderModule, device_ids=[self.args.local_rank], process_group=self.group)
             self.register_grid_ddp_hook()
 
     def init_nerf(self, args):
@@ -144,7 +148,7 @@ class GridBaseParallel(torch.nn.Module):
                 sum(self.app_n_comp) * len(self.resMode),
             ).to(self.device)
             if self.is_train:
-                self.nerf = DDP(self.nerf, device_ids=[self.args.local_rank])
+                self.nerf = DDP(self.nerf, device_ids=[self.args.local_rank], process_group=self.group)
                 self.register_nerf_ddp_hook()
         else:
             self.nerf = NeRF(
@@ -320,7 +324,9 @@ class GridBaseParallel(torch.nn.Module):
             batch = self.sigma_batch
             batch_sum = batch.clone()
 
-            dist.all_reduce(batch_sum)
+            group_to_use = process_group if process_group is not None else dist.group.WORLD
+
+            dist.all_reduce(batch_sum, group=group_to_use)
             if batch_sum == 0:
                 weight = 0
             else:
@@ -329,8 +335,6 @@ class GridBaseParallel(torch.nn.Module):
             # Apply the division first to avoid overflow, especially for FP16.
             tensor = bucket.buffer()
             tensor.mul_(weight)
-
-            group_to_use = process_group if process_group is not None else dist.group.WORLD
 
             return (
                 dist.all_reduce(tensor, group=group_to_use, async_op=True).get_future().then(lambda fut: fut.value()[0])
@@ -343,7 +347,9 @@ class GridBaseParallel(torch.nn.Module):
             batch = self.app_batch
             batch_sum = batch.clone().detach()
 
-            dist.all_reduce(batch_sum)
+            group_to_use = process_group if process_group is not None else dist.group.WORLD
+
+            dist.all_reduce(batch_sum, group=group_to_use)
             if batch_sum == 0:
                 weight = 0
             else:
@@ -353,8 +359,6 @@ class GridBaseParallel(torch.nn.Module):
             tensor = bucket.buffer()
             tensor.mul_(weight)
 
-            group_to_use = process_group if process_group is not None else dist.group.WORLD
-
             return (
                 dist.all_reduce(tensor, group=group_to_use, async_op=True).get_future().then(lambda fut: fut.value()[0])
             )
@@ -363,8 +367,12 @@ class GridBaseParallel(torch.nn.Module):
             # if the line is wrapped by DDP, it should be registered ddp comm hook
             self.density_line.register_comm_hook(self.group, sigma_allreduce_hook)
             self.app_line.register_comm_hook(self.group, app_allreduce_hook)
-        self.basis_mat.register_comm_hook(None, app_allreduce_hook)
-        self.renderModule.register_comm_hook(None, app_allreduce_hook)
+        if self.nonlinear_density:
+            self.basis_den.register_comm_hook(self.group, sigma_allreduce_hook)
+        self.basis_mat.register_comm_hook(self.group, app_allreduce_hook)
+        self.renderModule.register_comm_hook(self.group, app_allreduce_hook)
+        if self.args.encode_app:
+            self.embedding_app.register_comm_hook(self.group, app_allreduce_hook)
 
     def register_nerf_ddp_hook(self):
         """
@@ -378,7 +386,9 @@ class GridBaseParallel(torch.nn.Module):
             batch = self.nerf_batch
             batch_sum = batch.clone().detach()
 
-            dist.all_reduce(batch_sum)
+            group_to_use = process_group if process_group is not None else dist.group.WORLD
+
+            dist.all_reduce(batch_sum, group=group_to_use)
             if batch_sum == 0:
                 weight = 0
             else:
@@ -388,13 +398,11 @@ class GridBaseParallel(torch.nn.Module):
             tensor = bucket.buffer()
             tensor.mul_(weight)
 
-            group_to_use = process_group if process_group is not None else dist.group.WORLD
-
             return (
                 dist.all_reduce(tensor, group=group_to_use, async_op=True).get_future().then(lambda fut: fut.value()[0])
             )
 
-        self.nerf.register_comm_hook(None, nerf_allreduce_hook)
+        self.nerf.register_comm_hook(self.group, nerf_allreduce_hook)
 
     def save(self, path):
         """
@@ -434,7 +442,7 @@ class GridBaseParallel(torch.nn.Module):
             )
         self.load_state_dict(ckpt["state_dict"], strict=False)
 
-    def sample_ray(self, rays_o, rays_d, is_train=True, N_samples=-1):
+    def sample_ray(self, rays_o, rays_d, is_train=True, N_samples=-1, idxs=None):
         """
         Sample N_samples number points on a ray. If is_train is True, use segmented \
         random sampling. Otherwise use uniform sampling.
@@ -465,11 +473,15 @@ class GridBaseParallel(torch.nn.Module):
         step = stepsize * rng.to(rays_o.device)
         interpx = t_min[..., None] + step
         rays_pts = rays_o[..., None, :] + rays_d[..., None, :] * interpx[..., None]
+        if idxs is not None:
+            rays_pts_idxs = idxs.unsqueeze(1).repeat(1, rays_pts.shape[1]).type(torch.long)
+        else:
+            rays_pts_idxs = None
         aabb = self.aabb.clone()
         mask_outbbox = ((aabb[0] > rays_pts) | (rays_pts > aabb[1])).any(dim=-1)
-        return rays_pts, interpx, ~mask_outbbox
+        return rays_pts, rays_pts_idxs, interpx, ~mask_outbbox
 
-    def sample_ray_within_hull(self, rays_o, rays_d, is_train=True, N_samples=-1):
+    def sample_ray_within_hull(self, rays_o, rays_d, is_train=True, N_samples=-1, idxs=None):
         """
         Samples points along the rays within the bounding box.
 
@@ -499,9 +511,13 @@ class GridBaseParallel(torch.nn.Module):
             z_vals = lower + (upper - lower) * t_rand
 
         rays_pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]
+        if idxs is not None:
+            rays_pts_idxs = idxs.unsqueeze(1).repeat(1, rays_pts.shape[1]).type(torch.long)
+        else:
+            rays_pts_idxs = None
         aabb = self.aabb
         mask_outbbox = ((aabb[0] > rays_pts) | (rays_pts > aabb[1])).any(dim=-1)
-        return rays_pts, z_vals, ~mask_outbbox
+        return rays_pts, rays_pts_idxs, z_vals, ~mask_outbbox
 
     @torch.no_grad()
     def getDenseAlpha(self, gridSize=None):
@@ -609,13 +625,13 @@ class GridBaseParallel(torch.nn.Module):
                 masks, xyz_sampled = self.split_samples(xyz_sampled)
 
                 sigma_tensor_list = [torch.zeros(mask.sum(), device=self.device) for mask in masks]
-                if masks[self.args.rank].sum():
-                    sigma_feature = self.compute_densityfeature(xyz_sampled[masks[self.args.rank]])
+                if masks[self.args.part].sum():
+                    sigma_feature = self.compute_densityfeature(xyz_sampled[masks[self.args.part]])
                     validsigma = self.feature2density(sigma_feature)
                 else:
-                    validsigma = sigma_tensor_list[self.args.rank]
+                    validsigma = sigma_tensor_list[self.args.part]
 
-                dist.all_gather(sigma_tensor_list, validsigma)
+                dist.all_gather(sigma_tensor_list, validsigma, self.group)
                 sigma_valid = torch.zeros_like(sigma[alpha_mask], device=self.device)
                 for mask, validsigma in zip(masks, sigma_tensor_list):
                     sigma_valid.masked_scatter_(mask, validsigma)
@@ -629,26 +645,50 @@ class GridBaseParallel(torch.nn.Module):
         alpha = 1 - torch.exp(-sigma * length).view(xyz_locs.shape[:-1])
         return alpha
 
+    def compute_app_render(self, xyz_sampled, app_mask, viewdirs, rgb, use_xyzb, app_code, xyz_sampled_idxs):
+        app_features = self.compute_appfeature(xyz_sampled[app_mask], use_xyzb=use_xyzb)
+        app_latent = self.compute_app_latent(xyz_sampled, app_mask, app_code, xyz_sampled_idxs)
+        valid_rgbs = self.renderModule(viewdirs[app_mask], app_features, app_latent)  # pylint: disable=E1102
+        rgb[app_mask] = valid_rgbs
+        return rgb, app_features, valid_rgbs
+
+    def compute_app_latent(self, xyzb_sampled, app_mask, app_code, xyz_sampled_idxs):
+        if self.args.encode_app:
+            if xyz_sampled_idxs is None:
+                fake_xyzb_sampled_idxs = (
+                    torch.ones(xyzb_sampled.shape[:-1], dtype=torch.long, device=self.device) * app_code.long()
+                )
+                app_latent = self.embedding_app(fake_xyzb_sampled_idxs[app_mask])
+            else:
+                app_latent = self.embedding_app(xyz_sampled_idxs[app_mask])
+        else:
+            app_latent = None
+        return app_latent
+
     def forward(
         self,
         rays_chunk,
+        app_code=0,
         white_bg=True,
         is_train=False,
         N_samples=-1,
+        idxs_chunk=None,
     ):
         rays_o = rays_chunk[:, :3]
         rays_d = viewdirs = rays_chunk[:, 3:6]
 
         if is_train or (not is_train and not self.sampling_opt):
             # dense sample
-            xyz_sampled, z_vals, ray_valid = self.sample_ray(rays_o, viewdirs, is_train=is_train, N_samples=N_samples)
+            xyz_sampled, xyz_sampled_idxs, z_vals, ray_valid = self.sample_ray(
+                rays_o, viewdirs, is_train=is_train, N_samples=N_samples, idxs=idxs_chunk
+            )
 
             dists = torch.cat((z_vals[:, 1:] - z_vals[:, :-1], torch.zeros_like(z_vals[:, :1])), dim=-1)
             viewdirs = viewdirs.view(-1, 1, 3).expand(xyz_sampled.shape)
 
             if self.alphaMask is not None:
                 alphas = self.alphaMask.sample_alpha(xyz_sampled[ray_valid])
-                alpha_mask = alphas > 0
+                alpha_mask = alphas > self.alpha_mask_filter_thre
                 ray_invalid = ~ray_valid
                 ray_invalid[ray_valid] |= ~alpha_mask
                 ray_valid = ~ray_invalid
@@ -673,27 +713,27 @@ class GridBaseParallel(torch.nn.Module):
 
             # compute sigma
             if (is_train and self.use_plane_split) or (not is_train and self.args.ckpt_type == "sub"):
-                self.sigma_batch = masks[self.args.rank].sum()
+                self.sigma_batch = masks[self.args.part].sum()
                 sigma_tensor_list = [
                     torch.zeros(mask.sum(), device=self.device)
                     if mask.sum() > 0 or not self.training
                     else torch.zeros((1), device=self.device)
                     for mask in masks
                 ]
-                if ray_valid.any() and masks[self.args.rank].any():
-                    sigma_feature = self.compute_densityfeature(xyz_sampled[ray_valid][masks[self.args.rank]])
+                if ray_valid.any() and masks[self.args.part].any():
+                    sigma_feature = self.compute_densityfeature(xyz_sampled[ray_valid][masks[self.args.part]])
                     validsigma = self.feature2density(sigma_feature)
                 else:
                     if self.training:
                         tmp_input = xyz_sampled[ray_valid][:1]
                         sigma_feature = self.compute_densityfeature(tmp_input)
                         validsigma = self.feature2density(sigma_feature)
-                        sigma_tensor_list[self.args.rank] = torch.zeros((1), device=self.device)
+                        sigma_tensor_list[self.args.part] = torch.zeros((1), device=self.device)
                     else:
-                        validsigma = sigma_tensor_list[self.args.rank]
+                        validsigma = sigma_tensor_list[self.args.part]
                 with torch.no_grad():
-                    dist.all_gather(sigma_tensor_list, validsigma)
-                sigma_tensor_list[self.args.rank] = validsigma
+                    dist.all_gather(sigma_tensor_list, validsigma, group=self.group)
+                sigma_tensor_list[self.args.part] = validsigma
                 sigma_valid = torch.zeros_like(sigma[ray_valid], device=self.device)
                 for mask, validsigma in zip(masks, sigma_tensor_list):
                     sigma_valid.masked_scatter_(mask, validsigma)
@@ -720,29 +760,48 @@ class GridBaseParallel(torch.nn.Module):
                     else torch.zeros((1, 3), device=self.device)
                     for mask in masks
                 ]
-                self.app_batch = (valid_app_mask & masks[self.args.rank]).sum()
+                self.app_batch = (valid_app_mask & masks[self.args.part]).sum()
 
-                if app_mask.any() and (valid_app_mask & masks[self.args.rank]).any():
+                if app_mask.any() and (valid_app_mask & masks[self.args.part]).any():
                     app_features = self.compute_appfeature(
-                        xyz_sampled[ray_valid][valid_app_mask & masks[self.args.rank]]
+                        xyz_sampled[ray_valid][valid_app_mask & masks[self.args.part]]
                     )
+                    if self.args.encode_app:
+                        if xyz_sampled_idxs is None:
+                            fake_xyz_sampled_idxs = torch.zeros(
+                                xyz_sampled.shape[:-1], dtype=torch.long, device=self.device
+                            )
+                            app_latent = self.embedding_app(
+                                fake_xyz_sampled_idxs[ray_valid][valid_app_mask & masks[self.args.part]]
+                            )
+                        else:
+                            app_latent = self.embedding_app(
+                                xyz_sampled_idxs[ray_valid][valid_app_mask & masks[self.args.part]]
+                            )
+                    else:
+                        app_latent = None
                     valid_rgbs = self.renderModule(
-                        viewdirs[ray_valid][valid_app_mask & masks[self.args.rank]],
+                        viewdirs[ray_valid][valid_app_mask & masks[self.args.part]],
                         app_features,
+                        app_latent,
                     )
 
                 else:
                     if self.training:  # artifical sample is only needed in training time
                         tmp_input = xyz_sampled[ray_valid][:1]
                         app_features = self.compute_appfeature(tmp_input)
-                        valid_rgbs = self.renderModule(viewdirs[ray_valid][:1], app_features)
-                        rgb_tensor_list[self.args.rank] = torch.zeros((1, 3), device=self.device)
+                        if self.args.encode_app:
+                            app_latent = self.embedding_app(xyz_sampled_idxs[ray_valid][:1])
+                        else:
+                            app_latent = None
+                        valid_rgbs = self.renderModule(viewdirs[ray_valid][:1], app_features, app_latent)
+                        rgb_tensor_list[self.args.part] = torch.zeros((1, 3), device=self.device)
                     else:
-                        valid_rgbs = rgb_tensor_list[self.args.rank]
+                        valid_rgbs = rgb_tensor_list[self.args.part]
 
                 with torch.no_grad():
-                    dist.all_gather(rgb_tensor_list, valid_rgbs)
-                rgb_tensor_list[self.args.rank] = valid_rgbs
+                    dist.all_gather(rgb_tensor_list, valid_rgbs, group=self.group)
+                rgb_tensor_list[self.args.part] = valid_rgbs
 
                 rgb_valid = torch.zeros_like(rgb[ray_valid], device=self.device)
                 for mask, validrgb in zip(masks, rgb_tensor_list):
@@ -750,11 +809,16 @@ class GridBaseParallel(torch.nn.Module):
                 rgb.masked_scatter_(ray_valid.unsqueeze(-1).expand(-1, -1, 3), rgb_valid)
             else:
                 if app_mask.any():
-                    app_features = self.compute_appfeature(
-                        xyz_sampled[app_mask], use_xyzb=(not is_train and self.args.ckpt_type == "full")
+                    use_xyzb = not is_train and self.args.ckpt_type == "full"
+                    rgb, app_features, valid_rgbs = self.compute_app_render(
+                        xyz_sampled,
+                        app_mask,
+                        viewdirs,
+                        rgb,
+                        use_xyzb=use_xyzb,
+                        app_code=app_code,
+                        xyz_sampled_idxs=xyz_sampled_idxs,
                     )
-                    valid_rgbs = self.renderModule(viewdirs[app_mask], app_features)  # pylint: disable=E1102
-                    rgb[app_mask] = valid_rgbs
 
             acc_map = torch.sum(weight, -1)
             rgb_map = torch.sum(weight[..., None] * rgb, -2)
@@ -791,8 +855,8 @@ class GridBaseParallel(torch.nn.Module):
 
             # importance sample for grid branch (optional)
 
-            xyz_sampled, z_vals, ray_valid = self.sample_ray_within_hull(
-                rays_o, viewdirs, is_train=is_train, N_samples=self.n_importance
+            xyz_sampled, xyz_sampled_idxs, z_vals, ray_valid = self.sample_ray_within_hull(
+                rays_o, viewdirs, is_train=is_train, N_samples=self.n_importance, idxs=idxs_chunk
             )
             dists = torch.cat(
                 (z_vals[:, 1:] - z_vals[:, :-1], torch.zeros_like(z_vals[:, :1])),
@@ -801,7 +865,7 @@ class GridBaseParallel(torch.nn.Module):
             viewdirs = viewdirs.view(-1, 1, 3).expand(xyz_sampled.shape)
             if self.alphaMask is not None:
                 alphas = self.alphaMask.sample_alpha(xyz_sampled[ray_valid])
-                alpha_mask = alphas > 0
+                alpha_mask = alphas > self.alpha_mask_filter_thre
                 ray_invalid = ~ray_valid
                 ray_invalid[ray_valid] |= ~alpha_mask
                 ray_valid = ~ray_invalid
@@ -826,29 +890,29 @@ class GridBaseParallel(torch.nn.Module):
 
             # compute sigma
             if (is_train and self.use_plane_split) or (not is_train and self.args.ckpt_type == "sub"):
-                self.sigma_batch = masks[self.args.rank].sum()
+                self.sigma_batch = masks[self.args.part].sum()
                 sigma_tensor_list = [
                     torch.zeros(mask.sum(), device=self.device)
                     if mask.sum() > 0 or not self.training
                     else torch.zeros((1), device=self.device)
                     for mask in masks
                 ]
-                if ray_valid.any() and masks[self.args.rank].any():
-                    sigma_feature = self.compute_densityfeature(xyz_sampled[ray_valid][masks[self.args.rank]])
+                if ray_valid.any() and masks[self.args.part].any():
+                    sigma_feature = self.compute_densityfeature(xyz_sampled[ray_valid][masks[self.args.part]])
                     validsigma = self.feature2density(sigma_feature)
                 else:
                     if self.training:
                         tmp_input = xyz_sampled[ray_valid][:1]
                         sigma_feature = self.compute_densityfeature(tmp_input)
                         validsigma = self.feature2density(sigma_feature)
-                        sigma_tensor_list[self.args.rank] = torch.zeros((1), device=self.device)
+                        sigma_tensor_list[self.args.part] = torch.zeros((1), device=self.device)
                     else:
-                        validsigma = sigma_tensor_list[self.args.rank]
+                        validsigma = sigma_tensor_list[self.args.part]
                         # sigma[ray_valid] = validsigma
 
                 with torch.no_grad():
-                    dist.all_gather(sigma_tensor_list, validsigma)
-                sigma_tensor_list[self.args.rank] = validsigma
+                    dist.all_gather(sigma_tensor_list, validsigma, group=self.group)
+                sigma_tensor_list[self.args.part] = validsigma
 
                 sigma_valid = torch.zeros_like(sigma[ray_valid], device=self.device)
                 for mask, validsigma in zip(masks, sigma_tensor_list):
@@ -874,31 +938,43 @@ class GridBaseParallel(torch.nn.Module):
                     else torch.zeros((1, 3), device=self.device)
                     for mask in masks
                 ]
-                self.app_batch = (valid_app_mask & masks[self.args.rank]).sum()
+                self.app_batch = (valid_app_mask & masks[self.args.part]).sum()
 
-                if app_mask.any() and (valid_app_mask & masks[self.args.rank]).any():
+                if app_mask.any() and (valid_app_mask & masks[self.args.part]).any():
                     app_features = self.compute_appfeature(
-                        xyz_sampled[ray_valid][valid_app_mask & masks[self.args.rank]]
+                        xyz_sampled[ray_valid][valid_app_mask & masks[self.args.part]]
                     )
+                    if self.args.encode_app:
+                        app_latent = self.embedding_app(
+                            xyz_sampled_idxs[ray_valid][valid_app_mask & masks[self.args.part]]
+                        )
+                    else:
+                        app_latent = None
                     valid_rgbs = self.renderModule(
-                        viewdirs[ray_valid][valid_app_mask & masks[self.args.rank]],
+                        viewdirs[ray_valid][valid_app_mask & masks[self.args.part]],
                         app_features,
+                        app_latent,
                     )
                 else:
                     if self.training:  # artifical sample is only needed in training mode
                         tmp_input = xyz_sampled[ray_valid][:1]
                         app_features = self.compute_appfeature(tmp_input)
+                        if self.args.encode_app:
+                            app_latent = self.embedding_app(xyz_sampled_idxs[ray_valid][:1])
+                        else:
+                            app_latent = None
                         valid_rgbs = self.renderModule(
                             viewdirs[ray_valid][:1],
                             app_features,
+                            app_latent,
                         )
-                        rgb_tensor_list[self.args.rank] = torch.zeros((1, 3), device=self.device)
+                        rgb_tensor_list[self.args.part] = torch.zeros((1, 3), device=self.device)
                     else:
-                        valid_rgbs = rgb_tensor_list[self.args.rank]
+                        valid_rgbs = rgb_tensor_list[self.args.part]
 
                 with torch.no_grad():
-                    dist.all_gather(rgb_tensor_list, valid_rgbs)
-                rgb_tensor_list[self.args.rank] = valid_rgbs
+                    dist.all_gather(rgb_tensor_list, valid_rgbs, group=self.group)
+                rgb_tensor_list[self.args.part] = valid_rgbs
 
                 rgb_valid = torch.zeros_like(rgb[ray_valid], device=self.device)
                 for mask, validrgb in zip(masks, rgb_tensor_list):
@@ -906,11 +982,16 @@ class GridBaseParallel(torch.nn.Module):
                 rgb.masked_scatter_(ray_valid.unsqueeze(-1).expand(-1, -1, 3), rgb_valid)
             else:
                 if app_mask.any():
-                    app_features = self.compute_appfeature(
-                        xyz_sampled[app_mask], use_xyzb=(not is_train and self.args.ckpt_type == "full")
+                    use_xyzb = not is_train and self.args.ckpt_type == "full"
+                    rgb, app_features, valid_rgbs = self.compute_app_render(
+                        xyz_sampled,
+                        app_mask,
+                        viewdirs,
+                        rgb,
+                        use_xyzb=use_xyzb,
+                        app_code=app_code,
+                        xyz_sampled_idxs=xyz_sampled_idxs,
                     )
-                    valid_rgbs = self.renderModule(viewdirs[app_mask], app_features)  # pylint: disable=E1102
-                    rgb[app_mask] = valid_rgbs
 
             acc_map = torch.sum(weight, -1)
             rgb_map = torch.sum(weight[..., None] * rgb, -2)
@@ -953,6 +1034,12 @@ class GridBaseParallel(torch.nn.Module):
                 xyz_sampled = (
                     rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]
                 )  # [N_rays, N_samples, 3]
+                if self.args.encode_app:
+                    xyz_sampled_idxs = (
+                        idxs_chunk.unsqueeze(1).repeat(1, xyz_sampled.shape[1], 1).view(-1, 1).type(torch.long)
+                    )
+                else:
+                    xyz_sampled_idxs = None
 
                 if (is_train and self.use_plane_split) or (not is_train and self.args.ckpt_type == "sub"):
                     orig_xyz_sampled = xyz_sampled.clone().detach()
@@ -960,13 +1047,13 @@ class GridBaseParallel(torch.nn.Module):
                     xyz_sampled = xyz_sampled.view(-1, 3)  # [N_rays*N_samples, 3]
                     # split samples
                     masks, xyz_sampled = self.split_samples(xyz_sampled)
-                    self.sigma_batch = self.app_batch = self.nerf_batch = masks[self.args.rank].sum()
-                    if masks[self.args.rank].sum():
+                    self.sigma_batch = self.app_batch = self.nerf_batch = masks[self.args.part].sum()
+                    if masks[self.args.part].sum():
                         sigma_feature, den_feat = self.compute_densityfeature(
-                            xyz_sampled[masks[self.args.rank]], return_feat=True
+                            xyz_sampled[masks[self.args.part]], return_feat=True
                         )
                         app_features, app_feat = self.compute_appfeature(
-                            xyz_sampled[masks[self.args.rank]], return_feat=True
+                            xyz_sampled[masks[self.args.part]], return_feat=True
                         )
                     else:
                         if self.training:  # artifical sample is only needed in training time
@@ -975,11 +1062,11 @@ class GridBaseParallel(torch.nn.Module):
                             app_features, app_feat = self.compute_appfeature(dummy_input, return_feat=True)
                         else:
                             den_feat = torch.zeros(
-                                (masks[self.args.rank].sum(), sum(self.density_n_comp)),
+                                (masks[self.args.part].sum(), sum(self.density_n_comp)),
                                 device=self.device,
                             )
                             app_feat = torch.zeros(
-                                (mask[self.args.rank].sum(), sum(self.app_n_comp)),
+                                (mask[self.args.part].sum(), sum(self.app_n_comp)),
                                 device=self.device,
                             )
                 else:
@@ -1007,34 +1094,54 @@ class GridBaseParallel(torch.nn.Module):
                         for mask in masks
                     ]
 
-                    if masks[self.args.rank].sum():
+                    if masks[self.args.part].sum():
+                        if self.args.encode_app:
+                            app_latent = self.embedding_app(xyz_sampled_idxs).view(-1, 48)[masks[self.args.part]]
+                        else:
+                            app_latent = None
                         nerf_outputs = self.nerf(
-                            orig_xyz_sampled.view(-1, 3)[masks[self.args.rank]],
-                            viewdirs.reshape(-1, 3)[masks[self.args.rank]],
+                            orig_xyz_sampled.view(-1, 3)[masks[self.args.part]],
+                            viewdirs.reshape(-1, 3)[masks[self.args.part]],
                             den_feat,
                             app_feat,
+                            app_latent,
                             dists,
                         )
                     else:
                         if self.training:
+                            if self.args.encode_app:
+                                app_latent = self.embedding_app(xyz_sampled_idxs).view(-1, 48)[:1]
+                            else:
+                                app_latent = None
                             nerf_outputs = self.nerf(
-                                orig_xyz_sampled.view(-1, 3)[:1], viewdirs.reshape(-1, 3)[:1], den_feat, app_feat, dists
+                                orig_xyz_sampled.view(-1, 3)[:1],
+                                viewdirs.reshape(-1, 3)[:1],
+                                den_feat,
+                                app_feat,
+                                app_latent,
+                                dists,
                             )
-                            nerf_outputs_list[self.args.rank] = torch.zeros((1, 4), device=self.device)
+                            nerf_outputs_list[self.args.part] = torch.zeros((1, 4), device=self.device)
                         else:
-                            nerf_outputs = nerf_outputs_list[self.args.rank]
+                            nerf_outputs = nerf_outputs_list[self.args.part]
 
                     with torch.no_grad():
-                        dist.all_gather(nerf_outputs_list, nerf_outputs)
-                    nerf_outputs_list[self.args.rank] = nerf_outputs
+                        dist.all_gather(nerf_outputs_list, nerf_outputs, group=self.group)
+                    nerf_outputs_list[self.args.part] = nerf_outputs
 
                     all_outputs = torch.zeros((nray * npts, 4), device=self.device)
                     for mask, nerf_outputs in zip(masks, nerf_outputs_list):
                         all_outputs.masked_scatter_(mask.unsqueeze(-1).expand(-1, 4), nerf_outputs)
                     extras = raw2outputs(all_outputs.view(nray, npts, -1), dists)
                 else:
+                    if self.args.encode_app:
+                        app_latent = self.embedding_app(xyz_sampled_idxs).view(-1, 48)
+                    else:
+                        app_latent = None
                     viewdirs = rays_d.view(-1, 1, 3).expand(xyz_sampled.shape)
-                    extras = self.nerf(xyz_sampled, viewdirs, den_feat, app_feat, dists)  # pylint: disable=E1102
+                    extras = self.nerf(
+                        xyz_sampled, viewdirs, den_feat, app_feat, app_latent, dists
+                    )  # pylint: disable=E1102
 
                 depth_map_nerf = torch.sum(extras["weights"] * z_vals, -1)
 

@@ -35,6 +35,9 @@ class GridNeRFChannelParallel(GridBaseParallel):
         if self.nonlinear_density:
             self.basis_den = torch.nn.Linear(sum(self.density_n_comp) * len(self.resMode), 1, bias=False).to(device)
 
+        if self.args.encode_app:
+            self.embedding_app = torch.nn.Embedding(11500, 48).to(device)  # (N, ch), N: total num of imgs in dataset
+
         print("density plane: ", self.density_plane)
 
     def init_one_svd(self, n_component, gridSize, scale, device):
@@ -67,9 +70,9 @@ class GridNeRFChannelParallel(GridBaseParallel):
                                     gridSize[mat_id_0] * j,
                                 )
                             ),
-                            self.world_size,
+                            self.args.model_parallel_degree,
                             dim=1,
-                        )[self.rank]
+                        )[self.args.part]
                     )
                 )  #
                 line_coef.append(
@@ -77,9 +80,9 @@ class GridNeRFChannelParallel(GridBaseParallel):
                         scale
                         * torch.chunk(
                             torch.randn((1, n_component[i], gridSize[vec_id] * j, 1)),
-                            self.world_size,
+                            self.args.model_parallel_degree,
                             dim=1,
-                        )[self.rank]
+                        )[self.args.part]
                     )
                 )
         return torch.nn.ParameterList(plane_coef).to(device), torch.nn.ParameterList(line_coef).to(device)
@@ -93,11 +96,11 @@ class GridNeRFChannelParallel(GridBaseParallel):
         Returns:
             torch.Tensor: garhered tensor
         """
-        return AllGather.apply(tensor, self.rank, self.world_size, self.group)
+        return AllGather.apply(tensor, self.args.part, self.args.model_parallel_degree, self.group)
 
     # wrapped all_reduce function
     def all_reduce_func(self, tensor):
-        tensor.div_(self.world_size)
+        tensor.div_(self.args.model_parallel_degree)
         return AllReduce.apply(ReduceOp.SUM, self.group, tensor)
 
     def get_optparam_groups(self, lr_init_spatial=0.02, lr_init_network=0.001):
@@ -117,6 +120,8 @@ class GridNeRFChannelParallel(GridBaseParallel):
             {"params": self.app_plane, "lr": lr_init_spatial},
             {"params": self.basis_mat.parameters(), "lr": lr_init_network},
         ]
+        if self.args.encode_app:
+            grad_vars += [{"params": self.embedding_app.parameters(), "lr": lr_init_network}]
         if self.nonlinear_density:
             grad_vars += [{"params": self.basis_den.parameters(), "lr": lr_init_network}]
         if isinstance(self.renderModule, torch.nn.Module):
@@ -294,7 +299,7 @@ class GridNeRFChannelParallel(GridBaseParallel):
             n_comp, n_size = vector_comps[idx].shape[1:-1]
             vcmat = self.all_gather_func(vector_comps[idx].view(n_comp, n_size))
             dotp = torch.matmul(vcmat, vcmat.transpose(-1, -2))
-            n_comp = n_comp * self.world_size
+            n_comp = n_comp * self.model_parallel_degree
             non_diagonal = dotp.view(-1)[1:].view(n_comp - 1, n_comp + 1)[..., :-1]
             total = total + torch.mean(torch.abs(non_diagonal))
         return total
@@ -381,7 +386,7 @@ class GridNeRFChannelParallel(GridBaseParallel):
                 if name in key:
                     flag = True
             if flag:
-                split_tensor = torch.chunk(ckpt["state_dict"][key], self.world_size, dim=1)[self.rank]
+                split_tensor = torch.chunk(ckpt["state_dict"][key], self.model_parallel_degree, dim=1)[self.part]
                 ckpt["state_dict"][key] = split_tensor
         self.load_state_dict(ckpt["state_dict"], strict=False)
 
@@ -394,8 +399,8 @@ class GridNeRFChannelParallel(GridBaseParallel):
         """
         ckpts = []
         merged_ckpt = {}
-        for rank in range(self.args.world_size):
-            ckpt = f"{logfolder}/{self.args.expname}-sub{rank}.th"
+        for part in range(self.args.model_parallel_degree):
+            ckpt = f"{logfolder}/{self.args.expname}-sub{part}.th"
             print(ckpt)
             ckpts.append(torch.load(ckpt, map_location=self.args.device))
 
@@ -412,10 +417,10 @@ class GridNeRFChannelParallel(GridBaseParallel):
                     flag = True
             if flag:
                 _, n_channel, h, w = merged_ckpt["state_dict"][key].shape
-                global_shape = (1, n_channel * self.args.world_size, h, w)
+                global_shape = (1, n_channel * self.args.model_parallel_degree, h, w)
                 merged_tensor = torch.zeros(global_shape, device=self.device)
-                for rank in range(self.args.world_size):
-                    merged_tensor[0, n_channel * rank : n_channel * (rank + 1), ...] = ckpts[rank]["state_dict"][key]
+                for part in range(self.args.model_parallel_degree):
+                    merged_tensor[0, n_channel * part : n_channel * (part + 1), ...] = ckpts[part]["state_dict"][key]
                 merged_ckpt["state_dict"][key] = merged_tensor
 
         new_gridSize = [

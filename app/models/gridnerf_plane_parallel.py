@@ -3,9 +3,12 @@ import copy
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from models.gridnerf_parallel import GridBaseParallel
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
+
+from app.models.gridnerf_parallel import GridBaseParallel
+
+from .comm import AllGather
 
 
 class WrapLine(nn.Module):
@@ -57,14 +60,26 @@ class GridNeRFPlaneParallel(GridBaseParallel):
         """
         self.density_plane, self.density_line = self.init_one_svd(self.density_n_comp, self.gridSize, 0.1, device)
         self.app_plane, self.app_line = self.init_one_svd(self.app_n_comp, self.gridSize, 0.1, device)
-        self.density_line = DDP(self.density_line, device_ids=[self.args.local_rank])
-        self.app_line = DDP(self.app_line, device_ids=[self.args.local_rank])
+        if self.is_train:
+            self.density_line = DDP(self.density_line, device_ids=[self.args.local_rank], process_group=self.group)
+            self.app_line = DDP(self.app_line, device_ids=[self.args.local_rank], process_group=self.group)
 
         self.basis_mat = torch.nn.Linear(sum(self.app_n_comp) * len(self.resMode), self.app_dim, bias=False).to(device)
-        self.basis_mat = DDP(self.basis_mat, device_ids=[self.args.local_rank])
+        if self.is_train:
+            self.basis_mat = DDP(self.basis_mat, device_ids=[self.args.local_rank], process_group=self.group)
         if self.nonlinear_density:
             self.basis_den = torch.nn.Linear(sum(self.density_n_comp) * len(self.resMode), 1, bias=False).to(device)
-            self.basis_den = DDP(self.basis_den, device_ids=[self.args.local_rank])
+            if self.is_train:
+                self.basis_den = DDP(self.basis_den, device_ids=[self.args.local_rank], process_group=self.group)
+
+        if self.args.encode_app:
+            self.embedding_app = torch.nn.Embedding(
+                11500, 48, device=device
+            )  # (N, ch), N: total num of imgs in dataset
+            if self.is_train:
+                self.embedding_app = DDP(
+                    self.embedding_app, device_ids=[self.args.local_rank], process_group=self.group
+                )
 
         print(self.density_plane)
 
@@ -82,29 +97,53 @@ class GridNeRFPlaneParallel(GridBaseParallel):
             tuple: A tuple containing the plane and line coefficients.
         """
         plane_coef, line_coef = [], []
-        for i in range(len(self.vecMode)):
-            vec_id = self.vecMode[i]
-            mat_id_0, mat_id_1 = self.matMode[i]
-            for j in self.resMode:
-                # plane_coef
-                # init same global plane and extract local plane for each rank
-                global_plane = scale * torch.randn(
-                    (1, n_component[i], gridSize[mat_id_1] * j, gridSize[mat_id_0] * j),
-                    device=self.device,
-                )
-                dist.broadcast(global_plane, src=0)
-                local_shape = [
-                    gridSize[mat_id_1] * j // self.args.plane_division[mat_id_1],
-                    gridSize[mat_id_0] * j // self.args.plane_division[mat_id_0],
-                ]
-                x = local_shape[1] * (self.args.rank // self.args.plane_division[1])
-                y = local_shape[0] * (self.args.rank % self.args.plane_division[1])
-                local_plane = global_plane[..., y : y + local_shape[0], x : x + local_shape[1]].clone()
-                del global_plane
-                plane_coef.append(torch.nn.Parameter(local_plane))
-                # line_coef
-                line_coef.append(torch.nn.Parameter(scale * torch.randn((1, n_component[i], gridSize[vec_id] * j, 1))))
+        if self.args.ckpt is None:
+            for i in range(len(self.vecMode)):
+                vec_id = self.vecMode[i]
+                mat_id_0, mat_id_1 = self.matMode[i]
+                for j in self.resMode:
+                    # plane_coef
+                    # init same global plane and extract local plane for each rank
+                    global_plane = scale * torch.randn(
+                        (1, n_component[i], gridSize[mat_id_1] * j, gridSize[mat_id_0] * j),
+                        device=self.device,
+                    )
+                    dist.broadcast(global_plane, src=0)
+                    local_shape = [
+                        gridSize[mat_id_1] * j // self.args.plane_division[mat_id_1],
+                        gridSize[mat_id_0] * j // self.args.plane_division[mat_id_0],
+                    ]
+                    x = local_shape[1] * (self.args.part // self.args.plane_division[1])
+                    y = local_shape[0] * (self.args.part % self.args.plane_division[1])
+                    local_plane = global_plane[..., y : y + local_shape[0], x : x + local_shape[1]].clone()
+                    del global_plane
+                    plane_coef.append(torch.nn.Parameter(local_plane))
+                    # line_coef
+                    line_coef.append(
+                        torch.nn.Parameter(scale * torch.randn((1, n_component[i], gridSize[vec_id] * j, 1)))
+                    )
+        else:
+            ckpt = torch.load(self.args.ckpt, map_location=self.args.device)
+            print(ckpt["state_dict"].keys())
+            for i in range(len(self.vecMode)):
+                for j in range(len(self.resMode)):
+                    planeSize = ckpt["state_dict"][f"density_plane.{j}"].shape[-2:]
+                    lineSize = ckpt["state_dict"][f"density_line.module.line.{j}"].shape[-2:]
+                    plane_coef.append(torch.nn.Parameter(scale * torch.randn((1, n_component[i], *planeSize))))
+                    line_coef.append(torch.nn.Parameter(scale * torch.randn((1, n_component[i], *lineSize))))
+            del ckpt
         return torch.nn.ParameterList(plane_coef).to(device), WrapLine(line_coef).to(device)
+
+    def all_gather_func(self, tensor):
+        """wrapped all_gather function
+
+        Args:
+            tensor (torch.Tensor): the input tensor
+
+        Returns:
+            torch.Tensor: garhered tensor
+        """
+        return AllGather.apply(tensor, self.args.part, self.args.model_parallel_degree, self.group)
 
     # optimization
     def get_optparam_groups(self, lr_init_spatial=0.02, lr_init_network=0.001):
@@ -125,6 +164,8 @@ class GridNeRFPlaneParallel(GridBaseParallel):
             {"params": self.app_plane, "lr": lr_init_spatial},
             {"params": self.basis_mat.parameters(), "lr": lr_init_network},
         ]
+        if self.args.encode_app:
+            grad_vars += [{"params": self.embedding_app.parameters(), "lr": lr_init_network}]
         if self.nonlinear_density:
             grad_vars += [{"params": self.basis_den.parameters(), "lr": lr_init_network}]
         if isinstance(self.renderModule, torch.nn.Module):
@@ -134,7 +175,7 @@ class GridNeRFPlaneParallel(GridBaseParallel):
         return grad_vars
 
     # obtain feature grids
-    def compute_densityfeature(self, xyz_sampled, return_feat=False, use_xyzb=False):
+    def compute_densityfeature(self, xyz_sampled, return_feat=False, use_xyzb=False):  # pylint: disable=W0613
         """
         Computes the density feature for a given set of sampled points.
 
@@ -180,7 +221,7 @@ class GridNeRFPlaneParallel(GridBaseParallel):
 
         return sigma_feature
 
-    def compute_appfeature(self, xyz_sampled, return_feat=False, use_xyzb=False):
+    def compute_appfeature(self, xyz_sampled, return_feat=False, use_xyzb=False):  # pylint: disable=W0613
         """
         Computes the appearance feature for a given set of sampled points.
 
@@ -318,9 +359,10 @@ class GridNeRFPlaneParallel(GridBaseParallel):
         """
         total = 0
         for idx in range(len(self.density_plane)):
+            dp = self.all_gather_func(torch.mean(torch.abs(self.density_plane[idx])).view([1, 1]))
             total = (
                 total
-                + torch.mean(torch.abs(self.density_plane[idx])) / self.args.world_size
+                + torch.mean(dp) / self.args.model_parallel_degree
                 + torch.mean(torch.abs(self.density_line.module.line[idx]))
             )
         return total
@@ -338,7 +380,7 @@ class GridNeRFPlaneParallel(GridBaseParallel):
         total = 0
         for idx in range(len(self.density_plane)):
             total = total + reg(self.density_plane[idx]) * 1e-2
-        return total
+        return torch.mean(self.all_gather_func(total.view([1, 1])))
 
     def TV_loss_app(self, reg):
         """
@@ -353,7 +395,7 @@ class GridNeRFPlaneParallel(GridBaseParallel):
         total = 0
         for idx in range(len(self.app_plane)):
             total = total + reg(self.app_plane[idx]) * 1e-2
-        return total
+        return torch.mean(self.all_gather_func(total.view([1, 1])))
 
     def merge_ckpts(self, logfolder):
         """
@@ -367,8 +409,8 @@ class GridNeRFPlaneParallel(GridBaseParallel):
             print(f"Export merged checkpoint to {merged_ckpt_fp}")
             ckpts = []
             merged_ckpt = {}
-            for rank in range(self.args.world_size):
-                ckpt = f"{logfolder}/{self.args.expname}-sub{rank}.th"
+            for part in range(self.args.model_parallel_degree):
+                ckpt = f"{logfolder}/{self.args.expname}-sub{part}.th"
                 ckpts.append(torch.load(ckpt, map_location=self.args.device))
 
             # set state_dict
@@ -390,10 +432,10 @@ class GridNeRFPlaneParallel(GridBaseParallel):
                         (w - 1) * self.args.plane_division[0] + 1,
                     )
                     merged_tensor = torch.zeros(global_shape, device=self.device)
-                    for rank in range(self.args.world_size):
-                        x = (w - 1) * (rank // self.args.plane_division[1])
-                        y = (h - 1) * (rank % self.args.plane_division[1])
-                        merged_tensor[..., y : y + h, x : x + w] = ckpts[rank]["state_dict"][key]
+                    for part in range(self.args.model_parallel_degree):
+                        x = (w - 1) * (part // self.args.plane_division[1])
+                        y = (h - 1) * (part % self.args.plane_division[1])
+                        merged_tensor[..., y : y + h, x : x + w] = ckpts[part]["state_dict"][key]
                     merged_ckpt["state_dict"][key] = merged_tensor
 
                 # remove '.module'

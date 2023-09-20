@@ -4,7 +4,7 @@ datadir = ai_tower_all
 dataset_name = city
 expname = west_x5
 subfolder = [west]
-ndim = 1
+ndims = 1
 
 use_preprocessed_data = 1
 processed_data_type = file

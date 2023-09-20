@@ -74,6 +74,49 @@ def read_Image(f_path, transform):
     return img
 
 
+def load_json_matrixcity_data(root_dir, split, image_scale, subfolder=None, debug=False):
+    """
+    Load matrixcity dataset.
+
+    Args:
+        root_dir(str): root dataset directory path.
+        split(str): split mode.
+        image_scale(float): image scale ratio.
+        subfolder(list): subfolder names.
+
+    Returns:
+        dict: meta dataset.
+    """
+    if subfolder is None:
+        subfolder = []
+
+    with open(os.path.join(root_dir, f"transforms_{split}.json"), "r", encoding="utf-8") as f:
+        meta = json.load(f)
+
+    if len(subfolder) != 0:
+        print("using data from", subfolder)
+        meta["frames"] = [f for f in meta["frames"] if f["file_path"].split("/")[-2] in subfolder]
+
+    imgfolder = os.path.join(root_dir)
+
+    fnames = [frame["file_path"] for frame in meta["frames"]]
+    poses = np.stack([np.array(frame["transform_matrix"]) for i, frame in enumerate(meta["frames"])])
+
+    img0 = cv2.imread(os.path.join(imgfolder, fnames[0]), cv2.IMREAD_UNCHANGED)  # [H, W, 3] o [H, W, 4]
+    H, W = img0.shape[:2]
+    focal = meta["fl_x"] / image_scale  # use SIMPLE_PINHOLE model
+
+    if debug:
+        fnames = fnames[::50]
+        poses = poses[::50]
+    return {
+        "poses": poses,
+        "fnames": fnames,
+        "hwf": [H, W, focal],
+        "imgfolder": imgfolder,
+    }
+
+
 def load_json_drone_data(root_dir, split, image_scale, subfolder=None, debug=False):
     """
     Load drone dataset.
@@ -91,10 +134,6 @@ def load_json_drone_data(root_dir, split, image_scale, subfolder=None, debug=Fal
         subfolder = []
     with open(os.path.join(root_dir, f"transforms_{split}.json"), "r", encoding="utf-8") as f:
         meta = json.load(f)
-    if split == "train":
-        with open(os.path.join(root_dir, f'{"transforms_test.json"}'), "r", encoding="utf-8") as f:
-            test_meta = json.load(f)
-        meta["frames"] += test_meta["frames"]
 
     if len(subfolder) != 0:
         print("using data from", subfolder)
@@ -110,7 +149,7 @@ def load_json_drone_data(root_dir, split, image_scale, subfolder=None, debug=Fal
 
     img0 = cv2.imread(os.path.join(imgfolder, fnames[0]), cv2.IMREAD_UNCHANGED)  # [H, W, 3] o [H, W, 4]
     H, W = img0.shape[:2]
-    focal = meta["focal"] * (10 / image_scale)
+    focal = meta["fl_x"] * (10 / image_scale)  # use SIMPLE_PINHOLE model
 
     if debug:
         fnames = fnames[::50]

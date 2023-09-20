@@ -1,10 +1,10 @@
 
-dataroot = /cpfs01/shared/landmarks-viewer/train_data/base/
+dataroot = /cpfs01/shared/pjlab-lingjun-landmarks/data/zhita
 datadir = ai_tower_all
 dataset_name = city
 expname = west_x5
 subfolder = [west]
-ndim = 1
+ndims = 1
 
 lb = [-2.4,-2.4,-0.05]
 ub = [2.4,2.4,0.55]

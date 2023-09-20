@@ -19,10 +19,11 @@ class ArgsParser:
         """
         Parse model arguments.
         """
-        parser = configargparse.ArgumentParser()
+        parser = configargparse.ArgumentParser(allow_abbrev=False)
         parser.add_argument("--config", is_config_file=True, help="path of config file")
         parser.add_argument("--model_name", type=str, default="GridNeRF")
         parser.add_argument("--resMode", type=int, action="append", help="resolution mode in muti-resolution model")
+        parser.add_argument("--encode_app", default=False, action="store_true")
         parser.add_argument("--run_nerf", default=False, action="store_true", help="whether to use NeRF branch")
         parser.add_argument("--nerf_D", type=int, default=6, help="density-related depth of MLP in NeRF branch")
         parser.add_argument("--nerf_D_a", type=int, default=2, help="color-related depth of MLP in NeRF branch")
@@ -86,7 +87,7 @@ class ArgsParser:
         """
         Parse train arguments.
         """
-        parser = configargparse.ArgumentParser()
+        parser = configargparse.ArgumentParser(allow_abbrev=False)
         parser.add_argument("--config", is_config_file=True, help="path of config file")
         parser.add_argument("--start_iters", type=int, default=0, help="number of start iteration in training")
         parser.add_argument("--n_iters", type=int, default=30000, help="total number of iterations in training")
@@ -168,11 +169,10 @@ class ArgsParser:
             "--channel_parallel", default=False, action="store_true", help="training in channel parallel"
         )
         parser.add_argument("--branch_parallel", default=False, action="store_true", help="training in block parallel")
-        parser.add_argument(
-            "--model_parallel_and_DDP", default=False, action="store_true", help="enable model parallel and DDP"
-        )
 
         parser.add_argument("--plane_division", type=int, action="append")
+
+        parser.add_argument("--channel_parallel_size", type=int, default=128, help="model size in channel parallel")
 
         if cmd is not None:
             self.train_args = parser.parse_known_args(cmd)[0]
@@ -183,7 +183,7 @@ class ArgsParser:
         """
         Parse render arguments.
         """
-        parser = configargparse.ArgumentParser()
+        parser = configargparse.ArgumentParser(allow_abbrev=False)
         parser.add_argument("--config", is_config_file=True, help="path of config file")
         parser.add_argument("--render_px", type=int, default=720, help="width of the images in rendering")
         parser.add_argument("--render_fov", type=float, default=65.0, help="fov of the images in rendering")
@@ -249,6 +249,10 @@ class ArgsParser:
             help="whether to open sampling optimization when rendering",
         )
 
+        parser.add_argument(
+            "--alpha_mask_filter_thre", type=float, default=0, help="filter samples with alpha that under the threshold"
+        )
+
         # blender flags
         parser.add_argument(
             "--white_bkgd",
@@ -258,6 +262,7 @@ class ArgsParser:
 
         # checkpoint type
         parser.add_argument(
+            "-CT",
             "--ckpt_type",
             type=str,
             default="full",
@@ -270,6 +275,14 @@ class ArgsParser:
 
         parser.add_argument("--plane_division", type=int, action="append")
 
+        parser.add_argument("--plane_parallel", default=False, action="store_true", help="training in plane parallel")
+
+        parser.add_argument(
+            "--channel_parallel", default=False, action="store_true", help="training in channel parallel"
+        )
+
+        parser.add_argument("--channel_parallel_size", type=int, default=128, help="model size in channel parallel")
+
         if cmd is not None:
             self.render_args = parser.parse_known_args(cmd)[0]
         else:
@@ -279,7 +292,7 @@ class ArgsParser:
         """
         Parse experimental arguments.
         """
-        parser = configargparse.ArgumentParser()
+        parser = configargparse.ArgumentParser(allow_abbrev=False)
         parser.add_argument("--config", is_config_file=True, help="path of config file")
         parser.add_argument("--expname", type=str, help="name of current training/rendering experiment")
         parser.add_argument("--basedir", type=str, default="./log", help="path to store the checkpoints and logs")
@@ -315,7 +328,9 @@ class ArgsParser:
         parser.add_argument("--local_rank", type=int, default=0, help="used for single machine")
 
         # logging/saving options
-        parser.add_argument("--N_vis", type=int, default=5, help="N images to visualize")
+        parser.add_argument(
+            "--N_vis", type=int, default=5, help="control the visualization images. Set -1 to show all images"
+        )
         parser.add_argument("--vis_every", type=int, default=10000, help="frequency of visualize the image")
 
         parser.add_argument("--filter_ray", default=False, action="store_true", help="whether to prefilter images")
@@ -330,6 +345,8 @@ class ArgsParser:
             default="aliyun",
             help="configure running env. Only suppport single_node/slurm/aliyun for now",
         )
+
+        parser.add_argument("--skip_save_imgs", default=False, action="store_true", help="whether to save imgs")
 
         if cmd is not None:
             self.exp_args = parser.parse_known_args(cmd)[0]

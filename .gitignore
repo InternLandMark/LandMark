@@ -8,5 +8,5 @@ prof_dir/
 *.png
 *.log
 debug/
-
 app/.vscode/
+ci_scripts/
