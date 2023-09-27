@@ -1,6 +1,6 @@
-from app.renderer import render
+from app.renderer import init_render_env, render
 from app.tests import P_CLUSTER_CKPT_DIR
-from app.tests.render.utils import check, ci_setting, init_render_env
+from app.tests.utils import render_check, render_setting
 
 
 class TestMatrixcity2BlockMultiPlaneParallel:
@@ -17,7 +17,7 @@ class TestMatrixcity2BlockMultiPlaneParallel:
             P_CLUSTER_CKPT_DIR + "matrix_city_block_1+2_plane_parallel/matrix_city_block_1+2_plane_parallel-merged.th "
         )
         cmd += self.ckpt_dir
-        cmd += ci_setting()
+        cmd += render_setting()
         self.args = init_render_env(cmd)
 
     def teardown_class(self):
@@ -25,4 +25,4 @@ class TestMatrixcity2BlockMultiPlaneParallel:
 
     def test_render(self):
         psnr = render(self.args)
-        check(new_psnr=psnr, base_psnr=25.978542, config=self.conf_dir, ckpt=self.ckpt_dir)
+        render_check(new_psnr=psnr, base_psnr=25.978542, config=self.conf_dir, ckpt=self.ckpt_dir)

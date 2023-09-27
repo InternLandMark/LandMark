@@ -174,6 +174,10 @@ class ArgsParser:
 
         parser.add_argument("--channel_parallel_size", type=int, default=128, help="model size in channel parallel")
 
+        parser.add_argument(
+            "--model_parallel_and_DDP", default=False, action="store_true", help="enable model parallel and DDP"
+        )
+
         if cmd is not None:
             self.train_args = parser.parse_known_args(cmd)[0]
         else:
@@ -262,7 +266,6 @@ class ArgsParser:
 
         # checkpoint type
         parser.add_argument(
-            "-CT",
             "--ckpt_type",
             type=str,
             default="full",

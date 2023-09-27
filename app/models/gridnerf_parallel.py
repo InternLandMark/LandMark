@@ -2,17 +2,58 @@
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch.nn
 import torch.nn.functional as F
+from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch_efficient_distloss import eff_distloss
 
 from app.tools.dataloader.ray_utils import sample_pdf
-from app.tools.utils import TVLoss, raw2alpha, st
+from app.tools.utils import TVLoss, raw2alpha, rm_redundant_words_in_state_dict, st
 
 from .alpha_mask import AlphaGridMask
 from .mlp_render_fea import MLPRender_Fea
 from .nerf_branch import NeRF, NeRFParallel, raw2outputs
+
+
+class WrapParam(nn.Module):
+    """
+    A wrap for plane and line, so that it can be wrapped by DDP.
+
+    Args:
+        coefs (list): A list of coefficients.
+    """
+
+    def __init__(self, coefs) -> None:
+        super().__init__()
+        self.params = torch.nn.ParameterList(coefs)
+
+    def forward(self, coordinates, idx_plane, idx_dim, align_corners=True):
+        """
+        Do F.grid_sample on the params.
+
+        Args:
+            coordinate (torch.Tensor): The coordinate to sample from.
+            idx_plane (int): The index of the plane to sample from.
+            idx_dim (int): The index of the dimension to sample from.
+            align_corners (bool): Whether to align the corners of the grid.
+
+        Returns:
+            torch.Tensor: The sampled values.
+        """
+        return F.grid_sample(
+            self.params[idx_plane],
+            coordinates[[idx_dim]],
+            align_corners=align_corners,
+        )
+
+    def __setitem__(self, idx, value):
+        self.params[idx] = value
+
+    def __getitem__(self, idx):
+        return self.params[idx]
+
+    def __len__(self):
+        return len(self.params)
 
 
 class GridBaseParallel(torch.nn.Module):
@@ -134,7 +175,7 @@ class GridBaseParallel(torch.nn.Module):
 
         self.use_plane_split = use_plane_split
         if self.use_plane_split and self.is_train:
-            self.renderModule = DDP(self.renderModule, device_ids=[self.args.local_rank], process_group=self.group)
+            self.renderModule = DDP(self.renderModule, device_ids=[self.args.local_rank], process_group=None)
             self.register_grid_ddp_hook()
 
     def init_nerf(self, args):
@@ -148,7 +189,7 @@ class GridBaseParallel(torch.nn.Module):
                 sum(self.app_n_comp) * len(self.resMode),
             ).to(self.device)
             if self.is_train:
-                self.nerf = DDP(self.nerf, device_ids=[self.args.local_rank], process_group=self.group)
+                self.nerf = DDP(self.nerf, device_ids=[self.args.local_rank], process_group=None)
                 self.register_nerf_ddp_hook()
         else:
             self.nerf = NeRF(
@@ -430,6 +471,15 @@ class GridBaseParallel(torch.nn.Module):
         Args:
             path: checkpoint path to load
         """
+        # remove redundant keys firstly
+        if not self.is_train:
+            rm_redundant_words_in_state_dict(ckpt["state_dict"], [".module", ".params"])
+            if self.args.plane_parallel:
+                line_keys = [key for key in ckpt["state_dict"].keys() if "line." in key]
+                new_line_keys = [key.replace("line.", "line.params.") for key in line_keys]
+                for key, new_key in zip(line_keys, new_line_keys):
+                    ckpt["state_dict"][new_key] = ckpt["state_dict"][key]
+
         if "alphaMask.aabb" in ckpt.keys():
             length = np.prod(ckpt["alphaMask.shape"])
             alpha_volume = torch.from_numpy(

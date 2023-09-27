@@ -1,5 +1,5 @@
-from app.tests.train.utils import check, ci_setting, init_train_env
-from app.trainer import train
+from app.tests.utils import train_check, train_setting
+from app.trainer import init_train_env, train
 
 
 class TestMatrixcity2BlockLowquality:
@@ -11,12 +11,12 @@ class TestMatrixcity2BlockLowquality:
         cmd = "--config "
         self.conf_dir = "confs/matrixcity/matrixcity_2block_lowquality.txt "
         cmd += self.conf_dir
-        cmd += ci_setting()
+        cmd += train_setting()
         self.args = init_train_env(cmd)
 
     def teardown_class(self):
         pass
 
-    def test_render(self):
+    def test_train(self):
         psnr = train(self.args)
-        check(new_psnr=psnr, base_psnr=22.908665, config=self.conf_dir)
+        train_check(new_psnr=psnr, base_psnr=22.908665, config=self.conf_dir)

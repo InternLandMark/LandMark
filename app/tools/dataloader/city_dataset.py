@@ -149,7 +149,7 @@ class CityDataset(BaseDataset):
 
             part_num = part_rays.shape[0]
             g = torch.Generator()
-            g.manual_seed(996007 * num)
+            g.manual_seed(args.random_seed * num)
             ids = torch.randperm(part_num, generator=g)
             curr = 0
             while curr + batch_size < part_num:
@@ -206,7 +206,7 @@ class CityDataset(BaseDataset):
         rest_idxs = torch.cat(rest_idxs, 0)
         rest_num = rest_rays.shape[0]
         g = torch.Generator()
-        g.manual_seed(996007)
+        g.manual_seed(args.random_seed)
         ids = torch.randperm(rest_num, generator=g)
         curr = 0
         while curr + batch_size < rest_num:
@@ -335,7 +335,7 @@ class CityDataset(BaseDataset):
 
         part_num = part_rays.shape[0]
         g = torch.Generator()
-        g.manual_seed(996007 * num)
+        g.manual_seed(args.random_seed * num)
         ids = torch.randperm(part_num, generator=g)
         curr = 0
         while curr + batch_size < part_num:
@@ -415,7 +415,7 @@ class CityDataset(BaseDataset):
 
             rest_num = rest_rays.shape[0]
             g = torch.Generator()
-            g.manual_seed(996007)
+            g.manual_seed(args.random_seed)
             ids = torch.randperm(rest_num, generator=g)
             curr = 0
             while curr + batch_size < rest_num:

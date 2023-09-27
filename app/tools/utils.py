@@ -235,3 +235,15 @@ def check_args(args):
 
     if args.DDP:
         assert args.add_lpips == -1, "Do not support lpips in DDP mode"
+
+
+def rm_redundant_words_in_state_dict(state_dict, word_list):
+    keys = sorted(state_dict.keys())
+    for key in keys:
+        new_key = key
+        for word in word_list:
+            w_begin = new_key.find(word)
+            if w_begin > -1:
+                new_key = new_key[:w_begin] + new_key[w_begin + len(word) :]
+
+        state_dict[new_key] = state_dict.pop(key)

@@ -139,7 +139,7 @@ def create_model(args, dataset_info):
             args=args,
             group=mp_group,
         )
-    if args.DDP:
+    if args.DDP and (not args.model_parallel or args.channel_parallel):
         gridnerf = NativeDDP(
             gridnerf, device_ids=[args.local_rank], process_group=ddp_group, find_unused_parameters=True
         )

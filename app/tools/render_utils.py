@@ -98,7 +98,7 @@ def evaluation(
         list: A list of PSNR for each image.
     """
     gridnerf.eval()
-    if args.DDP:
+    if (args.DDP) and (not args.plane_parallel and not args.branch_parallel):
         train_model = gridnerf.module
     else:
         train_model = gridnerf
@@ -409,6 +409,11 @@ def create_model(args):
             if args.ckpt_type == "sub":
                 args.ckpt = f"{args.logfolder}/{args.expname}-sub{args.rank}.th"
                 args.part = args.rank
+            elif args.ckpt_type == "full":
+                if args.branch_parallel:
+                    args.ckpt = f"{args.logfolder}/{args.expname}-merged-stack.th"
+                else:
+                    args.ckpt = f"{args.logfolder}/{args.expname}-merged.th"
             elif args.branch_parallel and args.ckpt_type == "part":
                 raise NotImplementedError
             else:

@@ -1,6 +1,6 @@
-from app.renderer import render
+from app.renderer import init_render_env, render
 from app.tests import P_CLUSTER_CKPT_DIR
-from app.tests.render.utils import check, ci_setting, init_render_env
+from app.tests.utils import render_check, render_setting
 
 
 class TestMatrixcity2BlockMultiBranchParallel:
@@ -19,7 +19,7 @@ class TestMatrixcity2BlockMultiBranchParallel:
         )
         cmd += self.ckpt_dir
         cmd += "--ckpt_type full "
-        cmd += ci_setting()
+        cmd += render_setting()
         self.args = init_render_env(cmd)
 
     def teardown_class(self):
@@ -27,4 +27,4 @@ class TestMatrixcity2BlockMultiBranchParallel:
 
     def test_render(self):
         psnr = render(self.args)
-        check(new_psnr=psnr, base_psnr=26.355559, config=self.conf_dir, ckpt=self.ckpt_dir)
+        render_check(new_psnr=psnr, base_psnr=26.355559, config=self.conf_dir, ckpt=self.ckpt_dir)

@@ -62,10 +62,9 @@
 </p>
 
 # 💻 About
-This repository contains the source code for the project LandMark, the groundbreaking large-scale 3D real-world city scene modeling and rendering system.<br>
-The project is built upon GridNeRF (CVPR23). Please refer to the paper and project page for more details.<br>
-Extending from GridNeRF, LandMark drastically improves training and rendering efficiency with parallelization, operators and kernels, as well as a polish over the algorithm.<br>
-Including:
+This repository contains the source code for the project LandMark, the groundbreaking large-scale 3D real-world city scene modeling and rendering system. The project is built upon GridNeRF (CVPR23). Please refer to the paper and project page for more details.
+
+Extending from GridNeRF, LandMark drastically improves training and rendering efficiency with parallelism, operators and kernels, as well as a polish over the algorithm. Including:
 
 - Large-scale, high-quality novel view rendering:
     - For the first time, we realized efficient training of 3D neural scenes on over 100 square kilometers of city data; and the rendering resolution reached 4K. We used over 200 billion learnable parameters to model the scene.
@@ -76,8 +75,9 @@ Including:
 - Distributed rendering system:
     - For real-time rendering of large scale GridNeRF model.
 
-And now it's possible to train and render with your own LandMark models and enjoy your creativity.<br>
-Your likes and contributions to the community are exactly what we need.
+And now it's possible to train and render with your own LandMark models and enjoy your creativity.
+
+Your likes and contributions to the community are exactly what we need!
 # 🎨 Support Features
 The LandMark supports plenty of features at present:
 
@@ -86,6 +86,7 @@ The LandMark supports plenty of features at present:
     - Branch Parallel
     - Plane Parallel
     - Channel Parallel
+- GridNeRF Hybrid Parallel Training with Model Parallel & DDP Training
 - GridNeRF Sequential Model Rendering
 - Pytorch DDP both on training and rendering
 
@@ -96,8 +97,7 @@ It's highly recommended to read the [DOCUMENTATION](https://internlandmark.githu
 
 # 🚀 Quickstart
 ## Prerequisites
-You must have a NVIDIA video card with [CUDA](https://docs.nvidia.com/cuda/cuda-quick-start-guide/index.html) installed on the system.<br>
-This library has been tested with single and multiple `A100` GPUs.
+You must have a NVIDIA GPU card with [CUDA](https://docs.nvidia.com/cuda/cuda-quick-start-guide/index.html) installed on the system. This library has been tested with single and multiple `A100` GPUs.
 ## Install LandMark
 The LandMark repository files contains configuration files to help you create a proper environment
 ```
@@ -124,12 +124,10 @@ We  provide `requirements.txt` for setting the environment easily.
 pip install -r requirements.txt
 ```
 ## Prepare Dataset
-For confidential reason, the native datasets we use as shown above will not be released.<br>
-For ideal reproduction result, [MatrixCity](https://city-super.github.io/matrixcity/) dataset is highly recommanded.<br>
-We've prepared tuned configuration files and dedicated dataloader for the MatrixCity dataset.<br>
-Large scale scenes captured from the real world are most suitable for our method.<br>
-We recommend using dataset of a building, a well-known LandMark and even a small town.<br>
-Prepare about 250 ~ 300 images of the reconstruction target. Make sure enough overlapping.<br>
+For confidentiality requirements, the native datasets we use as shown above will not be released. To ideal reproduce result, [MatrixCity](https://city-super.github.io/matrixcity/) dataset is highly recommanded. More details about how to reproducing please refer to the following Chapter: **MatrixCity Dataset**. We have prepared tuned configuration files and dedicated dataloader for the MatrixCity dataset.
+
+Large scale scenes captured from the real world are most suitable for our method. We recommend using dataset of a building, a well-known LandMark and even a small town. Prepare about 250 ~ 300 images of the reconstruction target. Make sure enough overlapping.
+
 Reform your dataset as the following structure:
 
 - your_dataset/
@@ -205,24 +203,52 @@ To render with DDP, use commands below:
 python -m torch.distributed.launch --nproc_per_node=number_of_GPUs app/renderer.py --config confs/city.txt --ckpt=log/your_expname/your_expname.th
 ```
 Some arguments related to the multi-GPU environment might need to be set properly. Specify `number_of_GPUs` according to your actual environment.
-## Train with the LandMark Parallel Methods
-Three types of Parallel strategies are currently supported for training.<br>
-It is worth pointing out that all these strategies are adapted for large-scale scene reconstruction with over `2000` images and area of `several acres`<br>
-To involve these parallel features in your experiments, simply use the configuration files such as `confs/city_multi_branch_parallel.txt`.<br>
-After changing the path arguments in the configuration file, you are ready to train a plug-and-play branch Parallel model:
+
+For example:
+- If training a sequential gridnerf model with N GPUs, it will enables `N` x DDP training
+- If training a gridnerf model by using branch parallel and plane_division `[2,2]` configuration, and the total num of GPUs used are N, it will enables `N/(2x2)` x DDP training.
+
+## Train with the LandMark Model Parallel Methods
+Three types of Model Parallel strategies are currently supported for training:
+- Channel Parallel
+- Plane Parallel
+- Branch Parallel
+
+It is worth pointing out that all these strategies are adapted for large-scale scene reconstruction with over `2000` images and area of `several acres`
+
+To involve these parallel features in your experiments, simply use the configuration files such as `confs/city_multi_branch_parallel.txt`. After setting the path arguments in the configuration file, you are ready to train a plug-and-play Branch Parallel model:
 ```
 python -m torch.distributed.launch --nproc_per_node=number_of_GPUs app/trainer.py --config confs/city_multi_branch_parallel.txt
 ```
-There are few differences in use between training a branch parallel model and a sequential model with DDP, but the training efficiency meet great acceleration.<br>
-Especially in reconstruction tasks of large scale scenes, our Parallel strategies shows stable adaption of capability in accelerating the whole training process.<br>
+There are few differences in use between training a branch parallel model and a sequential model with DDP, but the training efficiency meet great acceleration. Especially in reconstruction tasks of large scale scenes, our Parallel strategies shows stable adaption of capability in accelerating the whole training process.
+
 To render with the Parallel model after training, using the command as the sequential one
 ```
 python app/renderer.py --config confs/city_multi_branch_parallel.txt --ckpt=log/your_expname/your_expname.th
 ```
 ## MatrixCity Dataset
+### Dataset Preparation
 Fully supports the brilliant MatrixCity dataset. Dedicated files are given for block_1 and block_2 in `confs/matrixcity`. <br>
-It's recommended to download the datases from [OpenXLab](https://openxlab.org.cn/datasets/bdaibdai/MatrixCity).<br>
-For single GPU trainng, simply use:
+It's recommended to download the datases from [BaiduNetDisk](https://pan.baidu.com/s/187P0e5p1hz9t5mgdJXjL1g) (password: `hqnn`).<br>
+The following files are needed to be downloaded and be organized as the original directory structure:
+```
+MatrixCity/small_city/aerial/train/block_1.tar
+MatrixCity/small_city/aerial/train/block_2.tar
+MatrixCity/small_city/aerial/test/block_1_test.tar
+MatrixCity/small_city/aerial/test/block_2_test.tar
+MatrixCity/small_city/aerial/pose/block_A/
+```
+After downloaded, the tar files are needed to be unarchived by `tar -xf [tar_filename]`
+
+Lastly, the `dataroot`, `datadir`, and `dataset_name` in the config file should be set properly as follows:
+```
+dataroot = YOUR_MATRIXCITY_FOLDER_PATH/small_city/aerial/pose
+datadir = block_A
+dataset_name = matrixcity
+```
+### Training
+
+For single GPU training, simply use:
 ```
 python app/trainer.py --config confs/matrixcity_2block_multi.txt
 ```

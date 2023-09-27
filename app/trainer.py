@@ -27,6 +27,61 @@ from tqdm.auto import tqdm
 renderer = renderer_fn
 
 
+def init_train_env(cmd=None):
+    args_parser = ArgsParser(cmd)
+    exp_args = args_parser.get_exp_args()
+    model_args = args_parser.get_model_args()
+    render_args = args_parser.get_render_args()
+    train_args = args_parser.get_train_args()
+
+    args = ArgsConfig([exp_args, model_args, render_args, train_args])
+
+    torch.set_default_dtype(torch.float32)
+    torch.manual_seed(args.random_seed)
+    np.random.seed(args.random_seed)
+
+    # setup distributed
+    args.distributed = False
+    if "WORLD_SIZE" in os.environ:
+        args.distributed = int(os.environ["WORLD_SIZE"]) > 1
+    elif "SLURM_PROCID" in os.environ:
+        args.distributed = int(os.environ["SLURM_NTASKS"]) > 1
+    args.device = "cuda:0"
+    args.world_size = 1
+    args.rank = 0  # global rank
+    args.model_parallel = bool(args.plane_parallel or args.channel_parallel or args.branch_parallel)
+    if args.distributed:
+        init_distributed_mode(args)
+        print("settings for rank ", args.rank)
+        print("rank", args.rank)
+        print("world_size", args.world_size)
+        print("gpu", args.gpu)
+        print("local rank", args.local_rank)
+        print("device", args.device)
+        print(
+            f"Training in distributed mode with multiple processes, 1 GPU per process. Process {args.rank}, total"
+            f" {args.world_size}."
+        )
+        if not args.model_parallel:
+            args.DDP = True
+    else:
+        print("Training with a single process on 1 GPUs.")
+    assert args.rank >= 0
+
+    if args.branch_parallel or args.plane_parallel:
+        plane_division = args.plane_division
+        args.model_parallel_degree = plane_division[0] * plane_division[1]
+    elif args.channel_parallel:
+        args.model_parallel_degree = args.channel_parallel_size
+
+    if args.model_parallel_and_DDP:
+        args.DDP = True
+        args.num_mp_groups = int(args.world_size // args.model_parallel_degree)
+        args.dp_rank = args.rank // args.model_parallel_degree
+        init_comm_groups(model_parallel_degree=args.model_parallel_degree)
+    return args
+
+
 def train(args):
 
     datadir = args.datadir.split("/")[-1]
@@ -60,7 +115,8 @@ def train(args):
     gridnerf, reso_cur = create_model(args, dataset_info)
     gridnerf.train()
 
-    if args.DDP:
+    # only sequential model and channel parallel model will be wrapped by DDP when using DDP training.
+    if args.DDP and (not args.model_parallel or args.channel_parallel):
         train_model = gridnerf.module
     else:
         train_model = gridnerf
@@ -360,6 +416,16 @@ def train(args):
                 train_eval=True,
             )
             if args.DDP:
+                den_plane = (
+                    train_model.density_plane.module
+                    if isinstance(train_model.density_plane, NativeDDP)
+                    else train_model.density_plane
+                )
+                app_plane = (
+                    train_model.app_plane.module
+                    if isinstance(train_model.app_plane, NativeDDP)
+                    else train_model.app_plane
+                )
                 if args.plane_parallel or args.branch_parallel:
                     model_division = args.plane_division
                     parallel_degree = model_division[0] * model_division[1]
@@ -369,11 +435,11 @@ def train(args):
 
                         for i in [0]:
                             save_image(
-                                train_model.density_plane[i].permute(1, 0, 2, 3),
+                                den_plane[i].permute(1, 0, 2, 3),
                                 f"{logfolder}/den_plane_{i}_sub{args.rank}.png",
                             )
                             save_image(
-                                train_model.app_plane[i].permute(1, 0, 2, 3),
+                                app_plane[i].permute(1, 0, 2, 3),
                                 f"{logfolder}/app_plane_{i}_sub{args.rank}.png",
                             )
                 else:
@@ -382,11 +448,11 @@ def train(args):
                         print("render saved to", f"{logfolder}/imgs_vis/")
                         for i in [0]:
                             save_image(
-                                train_model.density_plane[i].permute(1, 0, 2, 3),
+                                den_plane[i].permute(1, 0, 2, 3),
                                 f"{logfolder}/den_plane_{i}.png",
                             )
                             save_image(
-                                train_model.app_plane[i].permute(1, 0, 2, 3),
+                                app_plane[i].permute(1, 0, 2, 3),
                                 f"{logfolder}/app_plane_{i}.png",
                             )
             else:
@@ -446,8 +512,8 @@ def train(args):
                 lr_scale = 1
             else:
                 lr_scale = args.lr_decay_target_ratio ** (iteration / args.n_iters)
-            if args.DDP:
-                if args.model_parallel_and_DDP:
+            if args.DDP and (not args.model_parallel or args.channel_parallel):
+                if args.channel_parallel:
                     ddp_group = get_dp_group()
                 else:
                     ddp_group = None
@@ -469,8 +535,8 @@ def train(args):
                 lr_scale = 1
             else:
                 lr_scale = args.lr_decay_target_ratio ** (iteration / args.n_iters)
-            if args.DDP:
-                if args.model_parallel_and_DDP:
+            if args.DDP and (not args.model_parallel or args.channel_parallel):
+                if args.channel_parallel:
                     ddp_group = get_dp_group()
                 else:
                     ddp_group = None
@@ -487,7 +553,7 @@ def train(args):
             optimizer = torch.optim.Adam(grad_vars, betas=(0.9, 0.99))
 
     if args.DDP:
-        if args.plane_parallel or args.branch_parallel or args.channel_parallel:
+        if args.model_parallel:
             if args.channel_parallel:
                 parallel_degree = args.channel_parallel_size
             else:
@@ -503,7 +569,7 @@ def train(args):
             if args.rank == 0:
                 train_model.save(f"{logfolder}/{args.expname}.th")
     else:
-        if args.plane_parallel or args.channel_parallel or args.branch_parallel:
+        if args.model_parallel:
             train_model.save(f"{logfolder}/{args.expname}-sub{args.rank}.th")
             if args.distributed:
                 dist.barrier()
@@ -533,58 +599,6 @@ def train(args):
 
 
 if __name__ == "__main__":
-
-    args_parser = ArgsParser()
-    exp_args = args_parser.get_exp_args()
-    model_args = args_parser.get_model_args()
-    render_args = args_parser.get_render_args()
-    train_args = args_parser.get_train_args()
-
-    init_args = ArgsConfig([exp_args, model_args, render_args, train_args])
-
-    torch.set_default_dtype(torch.float32)
-    torch.manual_seed(init_args.random_seed)
-    np.random.seed(init_args.random_seed)
-
-    # setup distributed
-    init_args.distributed = False
-    if "WORLD_SIZE" in os.environ:
-        init_args.distributed = int(os.environ["WORLD_SIZE"]) > 1
-    elif "SLURM_PROCID" in os.environ:
-        init_args.distributed = int(os.environ["SLURM_NTASKS"]) > 1
-    init_args.device = "cuda:0"
-    init_args.world_size = 1
-    init_args.rank = 0  # global rank
-    if init_args.distributed:
-        init_distributed_mode(init_args)
-        print("settings for rank ", init_args.rank)
-        print("rank", init_args.rank)
-        print("world_size", init_args.world_size)
-        print("gpu", init_args.gpu)
-        print("local rank", init_args.local_rank)
-        print("device", init_args.device)
-        print(
-            f"Training in distributed mode with multiple processes, 1 GPU per process. Process {init_args.rank}, total"
-            f" {init_args.world_size}."
-        )
-        if not init_args.channel_parallel and not init_args.plane_parallel and not init_args.branch_parallel:
-            init_args.DDP = True
-    else:
-        print("Training with a single process on 1 GPUs.")
-    assert init_args.rank >= 0
-
-    if init_args.branch_parallel or init_args.plane_parallel:
-        plane_division = init_args.plane_division
-        init_args.model_parallel_degree = plane_division[0] * plane_division[1]
-    elif init_args.channel_parallel:
-        init_args.model_parallel_degree = init_args.channel_parallel_size
-
-    if init_args.model_parallel_and_DDP:
-        init_args.DDP = True
-        init_args.num_mp_groups = int(init_args.world_size // init_args.model_parallel_degree)
-        init_args.dp_rank = init_args.rank // init_args.model_parallel_degree
-        init_comm_groups(model_parallel_degree=init_args.model_parallel_degree)
-
+    init_args = init_train_env()
     check_args(init_args)
-
     train(init_args)

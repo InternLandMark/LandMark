@@ -5,11 +5,13 @@ import sys
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from tools.slurm import get_dp_group
+from tools.utils import rm_redundant_words_in_state_dict
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm.auto import tqdm
 
 from .comm import AllGather
-from .gridnerf_parallel import GridBaseParallel
+from .gridnerf_parallel import GridBaseParallel, WrapParam
 
 
 class GridNeRFBranchParallel(GridBaseParallel):
@@ -29,25 +31,29 @@ class GridNeRFBranchParallel(GridBaseParallel):
         """
         self.density_plane, self.density_line = self.init_one_svd(self.density_n_comp, self.gridSize, 0.1, device)
         self.app_plane, self.app_line = self.init_one_svd(self.app_n_comp, self.gridSize, 0.1, device)
+        if self.args.DDP and self.is_train:
+            ddp_group = get_dp_group()
+            self.density_plane = DDP(self.density_plane, device_ids=[self.args.local_rank], process_group=ddp_group)
+            self.density_line = DDP(self.density_line, device_ids=[self.args.local_rank], process_group=ddp_group)
+            self.app_plane = DDP(self.app_plane, device_ids=[self.args.local_rank], process_group=ddp_group)
+            self.app_line = DDP(self.app_line, device_ids=[self.args.local_rank], process_group=ddp_group)
 
         self.basis_mat = torch.nn.Linear(
             sum(self.app_n_comp) * len(self.resMode), self.app_dim, bias=False, device=device
         )
         if self.is_train:
-            self.basis_mat = DDP(self.basis_mat, device_ids=[self.args.local_rank], process_group=self.group)
+            self.basis_mat = DDP(self.basis_mat, device_ids=[self.args.local_rank], process_group=None)
         if self.nonlinear_density:
             self.basis_den = torch.nn.Linear(sum(self.density_n_comp) * len(self.resMode), 1, bias=False, device=device)
             if self.is_train:
-                self.basis_den = DDP(self.basis_den, device_ids=[self.args.local_rank], process_group=self.group)
+                self.basis_den = DDP(self.basis_den, device_ids=[self.args.local_rank], process_group=None)
 
         if self.args.encode_app:
             self.embedding_app = torch.nn.Embedding(
                 11500, 48, device=device
             )  # (N, ch), N: total num of imgs in dataset
             if self.is_train:
-                self.embedding_app = DDP(
-                    self.embedding_app, device_ids=[self.args.local_rank], process_group=self.group
-                )
+                self.embedding_app = DDP(self.embedding_app, device_ids=[self.args.local_rank], process_group=None)
 
     def init_one_svd(self, n_component, gridSize, scale, device):
         """
@@ -92,6 +98,7 @@ class GridNeRFBranchParallel(GridBaseParallel):
             # set gridsize according to ckpt, since the scale relationship between different planes is broken
             # when using merged ckpts trained by plane parallel
             ckpt = torch.load(self.args.ckpt, map_location=self.args.device)
+            rm_redundant_words_in_state_dict(ckpt["state_dict"], [".module", ".params"])
             for i in range(len(self.vecMode)):
                 for j in range(len(self.resMode)):
                     self.plane_dim = 3 if ckpt["state_dict"][f"density_plane.{j}"].dim() == 5 else 2
@@ -100,6 +107,10 @@ class GridNeRFBranchParallel(GridBaseParallel):
                     plane_coef.append(torch.nn.Parameter(scale * torch.randn((1, n_component[i], *planeSize))))
                     line_coef.append(torch.nn.Parameter(scale * torch.randn((1, n_component[i], *lineSize))))
             del ckpt
+
+        if self.is_train and self.args.DDP:
+            return WrapParam(plane_coef).to(device), WrapParam(line_coef).to(device)
+
         return torch.nn.ParameterList(plane_coef).to(device), torch.nn.ParameterList(line_coef).to(device)
 
     def all_gather_func(self, tensor):
@@ -126,12 +137,22 @@ class GridNeRFBranchParallel(GridBaseParallel):
             list: A list of parameter groups for optimization.
         """
         grad_vars = [
-            {"params": self.density_line, "lr": lr_init_spatial},
-            {"params": self.density_plane, "lr": lr_init_spatial},
-            {"params": self.app_line, "lr": lr_init_spatial},
-            {"params": self.app_plane, "lr": lr_init_spatial},
             {"params": self.basis_mat.parameters(), "lr": lr_init_network},
         ]
+        if isinstance(self.density_plane, DDP):
+            grad_vars += [
+                {"params": self.density_line.parameters(), "lr": lr_init_spatial},
+                {"params": self.density_plane.parameters(), "lr": lr_init_spatial},
+                {"params": self.app_line.parameters(), "lr": lr_init_spatial},
+                {"params": self.app_plane.parameters(), "lr": lr_init_spatial},
+            ]
+        else:
+            grad_vars += [
+                {"params": self.density_line, "lr": lr_init_spatial},
+                {"params": self.density_plane, "lr": lr_init_spatial},
+                {"params": self.app_line, "lr": lr_init_spatial},
+                {"params": self.app_plane, "lr": lr_init_spatial},
+            ]
         if self.args.encode_app:
             grad_vars += [{"params": self.embedding_app.parameters(), "lr": lr_init_network}]
         if self.nonlinear_density:
@@ -182,16 +203,25 @@ class GridNeRFBranchParallel(GridBaseParallel):
             plane_coef_point, line_coef_point = [], []
         sigma_feature = torch.zeros((xyz_sampled.shape[0],), device=xyz_sampled.device)
 
-        for idx_plane in range(len(self.density_plane)):
+        idx_plane_rng = (
+            range(len(self.density_plane.module))
+            if isinstance(self.density_plane, DDP)
+            else range(len(self.density_plane))
+        )
+        for idx_plane in idx_plane_rng:
             idx_dim = idx_plane // len(self.resMode)
-            plane_coef = F.grid_sample(
-                self.density_plane[idx_plane],
-                coordinate_plane[[idx_dim]],
-                align_corners=True,
-            ).view(-1, *xyz_sampled.shape[:1])
-            line_coef = F.grid_sample(
-                self.density_line[idx_plane], coordinate_line[[idx_dim]], align_corners=True
-            ).view(-1, *xyz_sampled.shape[:1])
+            if isinstance(self.density_plane, DDP):
+                plane_coef = self.density_plane(coordinate_plane, idx_plane, idx_dim).view(-1, *xyz_sampled.shape[:1])
+                line_coef = self.density_line(coordinate_line, idx_plane, idx_dim).view(-1, *xyz_sampled.shape[:1])
+            else:
+                plane_coef = F.grid_sample(
+                    self.density_plane[idx_plane],
+                    coordinate_plane[[idx_dim]],
+                    align_corners=True,
+                ).view(-1, *xyz_sampled.shape[:1])
+                line_coef = F.grid_sample(
+                    self.density_line[idx_plane], coordinate_line[[idx_dim]], align_corners=True
+                ).view(-1, *xyz_sampled.shape[:1])
             if self.nonlinear_density or return_feat:
                 plane_coef_point.append(plane_coef)
                 line_coef_point.append(line_coef)
@@ -242,20 +272,31 @@ class GridNeRFBranchParallel(GridBaseParallel):
             )
         plane_coef_point, line_coef_point = [], []
 
-        for idx_plane in range(len(self.app_plane)):
+        idx_plane_rng = (
+            range(len(self.app_plane.module)) if isinstance(self.app_plane, DDP) else range(len(self.app_plane))
+        )
+        for idx_plane in idx_plane_rng:
             idx_dim = idx_plane // len(self.resMode)
-            plane_coef_point.append(
-                F.grid_sample(
-                    self.app_plane[idx_plane],
-                    coordinate_plane[[idx_dim]],
-                    align_corners=True,
-                ).view(-1, *xyz_sampled.shape[:-1])
-            )
-            line_coef_point.append(
-                F.grid_sample(self.app_line[idx_plane], coordinate_line[[idx_dim]], align_corners=True).view(
-                    -1, *xyz_sampled.shape[:1]
+            if isinstance(self.app_plane, DDP):
+                plane_coef_point.append(
+                    self.app_plane(coordinate_plane, idx_plane, idx_dim).view(-1, *xyz_sampled.shape[:-1])
                 )
-            )
+                line_coef_point.append(
+                    self.app_line(coordinate_line, idx_plane, idx_dim).view(-1, *xyz_sampled.shape[:1])
+                )
+            else:
+                plane_coef_point.append(
+                    F.grid_sample(
+                        self.app_plane[idx_plane],
+                        coordinate_plane[[idx_dim]],
+                        align_corners=True,
+                    ).view(-1, *xyz_sampled.shape[:-1])
+                )
+                line_coef_point.append(
+                    F.grid_sample(self.app_line[idx_plane], coordinate_line[[idx_dim]], align_corners=True).view(
+                        -1, *xyz_sampled.shape[:1]
+                    )
+                )
         plane_coef_point, line_coef_point = torch.cat(plane_coef_point), torch.cat(line_coef_point)
         if return_feat:
             return (
@@ -278,6 +319,10 @@ class GridNeRFBranchParallel(GridBaseParallel):
         Returns:
             tuple: A tuple containing the upsampled plane and line coefficients.
         """
+        if isinstance(plane_coef, DDP):
+            plane_coef = plane_coef.module
+            line_coef = line_coef.module
+
         for i in range(len(self.vecMode)):
             vec_id = self.vecMode[i]
             mat_id_0, mat_id_1 = self.matMode[i]
@@ -302,6 +347,11 @@ class GridNeRFBranchParallel(GridBaseParallel):
                         align_corners=True,
                     )
                 )
+        if isinstance(plane_coef, WrapParam):
+            ddp_group = get_dp_group()
+            plane_coef = DDP(plane_coef, device_ids=[self.args.local_rank], process_group=ddp_group)
+            line_coef = DDP(line_coef, device_ids=[self.args.local_rank], process_group=ddp_group)
+
         return plane_coef, line_coef
 
     @torch.no_grad()
@@ -330,6 +380,8 @@ class GridNeRFBranchParallel(GridBaseParallel):
                 the input vectors.
         """
         total = 0
+        if isinstance(vector_comps, DDP):
+            vector_comps = vector_comps.module
         for idx in range(len(vector_comps)):
             n_comp, n_size = vector_comps[idx].shape[1:-1]
             dotp = torch.matmul(
@@ -359,12 +411,16 @@ class GridNeRFBranchParallel(GridBaseParallel):
             torch.Tensor: The loss value
         """
         total = 0
-        for idx in range(len(self.density_plane)):
-            dp = self.all_gather_func(torch.mean(torch.abs(self.density_plane[idx])).view([1, 1]))
+        if isinstance(self.density_plane, DDP):
+            density_plane = self.density_plane.module
+            density_line = self.density_line.module
+        else:
+            density_plane = self.density_plane
+            density_line = self.density_line
+        for idx in range(len(density_plane)):
+            dp = self.all_gather_func(torch.mean(torch.abs(density_plane[idx])).view([1, 1]))
             # dl = self.all_gather_func(torch.mean(torch.abs(self.density_line[idx])).view([1, 1]))
-            total = (
-                total + torch.mean(dp) / self.args.model_parallel_degree + torch.mean(torch.abs(self.density_line[idx]))
-            )
+            total = total + torch.mean(dp) / self.args.model_parallel_degree + torch.mean(torch.abs(density_line[idx]))
         return total
 
     def TV_loss_density(self, reg):
@@ -378,8 +434,12 @@ class GridNeRFBranchParallel(GridBaseParallel):
             torch.Tensor: The total variation loss for the density plane coefficients.
         """
         total = 0
-        for idx in range(len(self.density_plane)):
-            total = total + reg(self.density_plane[idx]) * 1e-2
+        if isinstance(self.density_plane, DDP):
+            density_plane = self.density_plane.module
+        else:
+            density_plane = self.density_plane
+        for idx in range(len(density_plane)):
+            total = total + reg(density_plane[idx]) * 1e-2
         return torch.mean(self.all_gather_func(total.view([1, 1])))
 
     def TV_loss_app(self, reg):
@@ -393,8 +453,12 @@ class GridNeRFBranchParallel(GridBaseParallel):
             torch.Tensor: The total variation loss for the appearance plane coefficients.
         """
         total = 0
-        for idx in range(len(self.app_plane)):
-            total = total + reg(self.app_plane[idx]) * 1e-2
+        if isinstance(self.app_plane, DDP):
+            app_plane = self.app_plane.module
+        else:
+            app_plane = self.app_plane
+        for idx in range(len(app_plane)):
+            total = total + reg(app_plane[idx]) * 1e-2
         return torch.mean(self.all_gather_func(total.view([1, 1])))
 
     def merge_ckpts(self, logfolder):
@@ -446,12 +510,18 @@ class GridNeRFBranchParallel(GridBaseParallel):
                     merged_ckpt["state_dict"][key] = stack_tensor
                     gridShape[key] = stack_tensor.shape
 
-            # remove '.module'
-            new_key = key
-            m_begin = new_key.find(".module")
-            if m_begin > -1:
-                new_key = new_key[:m_begin] + new_key[m_begin + 7 :]
-            merged_ckpt["state_dict"][new_key] = merged_ckpt["state_dict"].pop(key)
+            # # remove '.module'
+            # new_key = key
+            # m_begin = new_key.find(".module")
+            # if m_begin > -1:
+            #     new_key = new_key[:m_begin] + new_key[m_begin + 7 :]
+            # # remove '.params'
+            # l_begin = new_key.find(".params")
+            # if l_begin > -1:
+            #     new_key = new_key[:l_begin] + new_key[l_begin + 7 :]
+            # merged_ckpt["state_dict"][new_key] = merged_ckpt["state_dict"].pop(key)
+
+        rm_redundant_words_in_state_dict(merged_ckpt["state_dict"], [".module", ".params"])
 
         new_gridSize = [
             merged_ckpt["state_dict"]["density_plane.0"].shape[-1],

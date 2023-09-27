@@ -1,5 +1,5 @@
-dataroot = /cpfs01/shared/pjlab-lingjun-landmarks/data/citymatrix/small_city/new_high/reconstruction
-datadir = block_1+2
+dataroot = /cpfs01/shared/pjlab-lingjun-landmarks/data/MatrixCity/small_city/aerial/pose
+datadir = block_A
 expname = matrix_city_block_1+2_channel_parallel
 dataset_name = matrixcity
 resMode = [1,2,4]
