@@ -1,6 +1,7 @@
 import torch
-from comm.parallel_context import ParallelContext, ParallelGroup
 from torch import distributed as dist
+
+from dist_render.comm.parallel_context import ParallelContext, ParallelGroup
 
 
 def scatter(tensor, scatter_list=None, async_op=False, parallel_group=ParallelGroup.AllProcesses):
@@ -47,6 +48,23 @@ def all_gather(tensor, tensor_list=None, async_op=False, parallel_group=Parallel
     return dist.all_gather(tensor_list=tensor_list, tensor=tensor, group=group, async_op=async_op)
 
 
+def all_reduce(tensor, async_op=False, parallel_group=ParallelGroup.AllProcesses):
+    """
+    custom all_reduce operation.
+
+    Args:
+        tensor(Tensor): Tensor to be reduce from current process.
+        async_op (bool): Whether this op should be an async op.
+        parallel_group(ParallelGroup): Parallel group type we defined in advance.
+
+    Returns:
+        Async work handle, if async_op is set to True.
+        None, if not async_op or if not part of the group
+    """
+    group = ParallelContext().get_group(parallel_group=parallel_group)
+    return dist.all_reduce(tensor=tensor, group=group, async_op=async_op)
+
+
 def gather(tensor, gather_list=None, dst=0, parallel_group=None, async_op=False):
     """
     custom gather operation.
@@ -68,7 +86,7 @@ def gather(tensor, gather_list=None, dst=0, parallel_group=None, async_op=False)
     return dist.gather(tensor, gather_list, dst, group, async_op)
 
 
-def broadcast(tensor, parallel_group=None, async_op=False):
+def broadcast(tensor, src=None, parallel_group=None, async_op=False):
     """
     custom broadcast operation.
 
@@ -83,6 +101,14 @@ def broadcast(tensor, parallel_group=None, async_op=False):
         Async work handle, if async_op is set to True.
         None, if not async_op or if not part of the group
     """
-    src = ParallelContext().get_group_src_rank(parallel_group=parallel_group)
+    if not src:
+        src = ParallelContext().get_group_src_rank(parallel_group=parallel_group)
     group = ParallelContext().get_group(parallel_group=parallel_group)
     return dist.broadcast(tensor=tensor, src=src, group=group, async_op=async_op)
+
+
+def broadcast_object_list(object_list, src=None, parallel_group=None, device=None):
+    if not src:
+        src = ParallelContext().get_group_src_rank(parallel_group=parallel_group)
+    group = ParallelContext().get_group(parallel_group=parallel_group)
+    return dist.broadcast_object_list(object_list=object_list, src=src, group=group, device=device)

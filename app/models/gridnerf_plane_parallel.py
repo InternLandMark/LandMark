@@ -3,11 +3,11 @@ import copy
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from tools.slurm import get_dp_group
-from tools.utils import rm_redundant_words_in_state_dict
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from app.models.gridnerf_parallel import GridBaseParallel, WrapParam
+from app.tools.slurm import get_dp_group
+from app.tools.utils import rm_redundant_words_in_state_dict
 
 from .comm import AllGather
 

@@ -2,10 +2,15 @@ import os
 import time
 from abc import abstractmethod
 
-from comm.parallel_context import ParallelContext, ParallelGroup, init_parallel_context
-from comm.types import DatasetType, ModelType, dataset_factory, runner_factory
-from ddp_infer.context import NerfContext
-from ddp_infer.nerf_inferer import generate_hw, render_other_rank
+from dist_render.comm.factory import dataset_factory, runner_factory
+from dist_render.comm.parallel_context import (
+    ParallelContext,
+    ParallelGroup,
+    init_parallel_context,
+)
+from dist_render.comm.types import DatasetType, ModelType
+from dist_render.ddp_infer.context import NerfContext
+from dist_render.ddp_infer.nerf_inferer import generate_hw, render_other_rank
 
 
 class AbstractRenderEngine:

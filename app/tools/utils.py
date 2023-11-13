@@ -40,7 +40,7 @@ class st:
 
 
 def positional_encoding(positions, freqs):
-    freq_bands = (2 ** torch.arange(freqs).float()).to(positions.device)  # (F,)
+    freq_bands = 2 ** torch.arange(freqs, dtype=torch.float, device=positions.device)  # (F,)
     pts = (positions[..., None] * freq_bands).reshape(
         positions.shape[:-1] + (freqs * positions.shape[-1],)
     )  # (..., DF)
@@ -54,7 +54,7 @@ def raw2alpha(sigma, dist):
     alpha = 1.0 - torch.exp(-sigma * dist)
 
     tensor = torch.cumprod(
-        torch.cat([torch.ones(alpha.shape[0], 1).to(alpha.device), 1.0 - alpha + 1e-10], -1),
+        torch.cat([torch.ones(alpha.shape[0], 1, device=alpha.device), 1.0 - alpha + 1e-10], -1),
         -1,
     )
 
@@ -231,6 +231,8 @@ def check_args(args):
             if args.model_parallel_and_DDP:
                 assert (args.batch_size // 8192) % args.num_mp_groups == 0
             else:
+                print("batch_size:", args.batch_size)
+                print("world_size:", args.world_size)
                 assert (args.batch_size // 8192) % args.world_size == 0
 
     if args.DDP:

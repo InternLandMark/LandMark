@@ -4,7 +4,8 @@ import os
 
 import numpy as np
 import torch
-from cc_parsing_utils import auto_orient_and_center_poses
+
+from .cc_parsing_utils import auto_orient_and_center_poses
 
 
 def parse_args():

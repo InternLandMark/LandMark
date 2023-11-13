@@ -1,14 +1,14 @@
 import numpy as np
 import torch
-from models import *  # noqa: F401, F403 # pylint: disable=W0611,W0401,W0614
-from tools.utils import n_to_reso
 from torch.nn.parallel import DistributedDataParallel as NativeDDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler as DSampler
 
-from .dataloader import dataset_dict
-from .dataloader.processeddataset import PreprocessedDataset
-from .slurm import get_dp_group, get_mp_group, get_mp_part
+from app.models import *  # noqa: F401, F403 # pylint: disable=W0611,W0401,W0614
+from app.tools.dataloader import dataset_dict
+from app.tools.dataloader.processeddataset import PreprocessedDataset
+from app.tools.slurm import get_dp_group, get_mp_group, get_mp_part
+from app.tools.utils import n_to_reso
 
 
 class DatasetInfo:
@@ -108,6 +108,8 @@ def create_model(args, dataset_info):
         mp_group = None
 
     if args.ckpt is not None:
+        if args.add_nerf > 0 and args.start_iters is not None and args.start_iters > args.add_nerf:
+            args.run_nerf = True
         ckpt = torch.load(args.ckpt, map_location=args.device)
         kwargs = ckpt["kwargs"]
         kwargs.update({"device": args.device, "args": args})
@@ -235,3 +237,48 @@ def prep_sampler(enable_lpips, args, train_dataset):
     else:
         trainingsampler = SimpleSampler(allrays.shape[0], args.batch_size)
     return allrays, allrgbs, allidxs, trainingsampler
+
+
+def save_optimizer(optimizer, path):
+    """
+        Save optimizer to a specific path.
+
+    Args:
+        optimizer (torch.optim.Optimizer): optimizer to be saved.
+        path (string): path to save the optimizer.
+    """
+    state = {"optimizer": optimizer.state_dict()}
+    torch.save(state, path)
+
+
+def create_optimizer(grad_vars, args):
+    """
+    create optimizer.
+
+    Args:
+        grad_vars (iterable): iterable of parameters to optimize or dicts defining parameter groups
+        args (tools.configs.ArgsConfig): Model configs.
+
+    Returns:
+        optimizer (torch.optim.Optimizer)
+    """
+    optimizer = torch.optim.Adam(grad_vars, betas=(0.9, 0.99))
+    if args.optim_dir is not None:
+        print("optim_dir is not none, try to load old optimizer")
+
+        if args.distributed:
+            if args.model_parallel_and_DDP:
+                args.part = get_mp_part()
+            else:
+                args.part = args.rank
+
+        if args.channel_parallel or args.plane_parallel or args.branch_parallel:
+            optim_file = f"{args.optim_dir}/{args.expname}_opt-sub{args.part}.th"
+        else:
+            optim_file = f"{args.optim_dir}/{args.expname}_opt.th"
+        checkpoint = torch.load(optim_file, "cpu")
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        print(f"load optimizer from {optim_file}")
+    else:
+        print("optim_dir is none, try to create new optimizer")
+    return optimizer

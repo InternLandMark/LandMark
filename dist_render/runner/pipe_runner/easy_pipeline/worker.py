@@ -150,7 +150,7 @@ class ProfileWorkerThread(WorkerThread):
 
     def run_worker(self):
         with torch.profiler.profile(
-            schedule=torch.profiler.schedule(wait=120, warmup=120, active=10, repeat=1),
+            schedule=torch.profiler.schedule(wait=60, warmup=0, active=40, repeat=1),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(os.path.expanduser("~/landmark/")),
             with_stack=True,
         ) as prof:

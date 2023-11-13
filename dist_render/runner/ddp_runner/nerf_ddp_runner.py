@@ -1,5 +1,9 @@
-from comm.parallel_context import ParallelContext, ParallelGroup, init_parallel_context
-from ddp_infer.nerf_inferer import (
+from dist_render.comm.parallel_context import (
+    ParallelContext,
+    ParallelGroup,
+    init_parallel_context,
+)
+from dist_render.ddp_infer.nerf_inferer import (
     generate_hw,
     infer,
     model_infer_postprocess,

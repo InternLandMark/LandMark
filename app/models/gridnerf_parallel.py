@@ -1194,12 +1194,22 @@ class GridBaseParallel(torch.nn.Module):
                     )  # pylint: disable=E1102
 
                 depth_map_nerf = torch.sum(extras["weights"] * z_vals, -1)
+                w = extras["weights"]
+                m = torch.cat(
+                    (
+                        (z_vals[:, 1:] + z_vals[:, :-1]) * 0.5,
+                        ((z_vals[:, 1:] + z_vals[:, :-1]) * 0.5)[:, -1:],
+                    ),
+                    dim=-1,
+                )
+                dist_loss_nerf = 0.01 * eff_distloss(w, m, dists).unsqueeze(0)
 
                 if self.residnerf:
                     outputs.update(
                         {
                             "rgb_map_nerf": (extras["rgb_map"] + rgb_map).clamp(min=0.0, max=1.0),
                             "depth_map_nerf": depth_map_nerf,
+                            "dist_loss_nerf": dist_loss_nerf,
                         }
                     )
                 else:
@@ -1207,6 +1217,7 @@ class GridBaseParallel(torch.nn.Module):
                         {
                             "rgb_map_nerf": extras["rgb_map"],
                             "depth_map_nerf": depth_map_nerf,
+                            "dist_loss_nerf": dist_loss_nerf,
                         }
                     )
 

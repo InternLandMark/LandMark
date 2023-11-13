@@ -69,6 +69,7 @@ class GridBaseSequential(torch.nn.Module):
         is_train=True,  # pylint: disable=W0613
     ):
         super().__init__()
+        print(f"aabb.device = {aabb.device}, device = {device}", flush=True)
 
         # new features
         if args.distributed:
@@ -156,7 +157,7 @@ class GridBaseSequential(torch.nn.Module):
         print(st.GREEN + "grid size" + st.RESET, gridSize, flush=True)
         self.aabbSize = self.aabb[1] - self.aabb[0]
         self.invaabbSize = 2.0 / self.aabbSize
-        self.gridSize = torch.LongTensor(gridSize).to(self.device)
+        self.gridSize = torch.tensor(gridSize, device=self.aabbSize.device)
         self.units = self.aabbSize / (self.gridSize - 1)
         self.stepSize = torch.mean(self.units) * self.step_ratio
         self.aabbDiag = torch.sqrt(torch.sum(torch.square(self.aabbSize)))
@@ -299,13 +300,13 @@ class GridBaseSequential(torch.nn.Module):
         d_z = rays_d[:, -1:]
         far = -(o_z / d_z)
         far[rays_d[:, 2] >= 0] = self.near_far[-1]
-        t_vals = torch.linspace(0.0, 1.0, steps=N_samples).to(rays_o)
+        t_vals = torch.linspace(0.0, 1.0, steps=N_samples, device=rays_o.device)
         z_vals = near * (1.0 - t_vals) + far * (t_vals)
         if is_train:
             mids = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])
             upper = torch.cat([mids, z_vals[..., -1:]], -1)
             lower = torch.cat([z_vals[..., :1], mids], -1)
-            t_rand = torch.rand(z_vals.shape).to(rays_o)
+            t_rand = torch.rand(z_vals.shape, device=rays_o.device)
             z_vals = lower + (upper - lower) * t_rand
 
         rays_pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]

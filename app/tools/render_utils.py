@@ -4,11 +4,12 @@ import os
 import imageio
 import numpy as np
 import torch
-from models import *  # noqa: F401, F403 # pylint: disable=W0611,W0401,W0614
-from tools.slurm import get_dp_group
-from tools.utils import rgb_lpips, rgb_ssim, visualize_depth_numpy
 from torch import distributed as dist
 from tqdm.auto import tqdm
+
+from app.models import *  # noqa: F401, F403 # pylint: disable=W0611,W0401,W0614
+from app.tools.slurm import get_dp_group
+from app.tools.utils import rgb_lpips, rgb_ssim, visualize_depth_numpy
 
 
 def renderer_fn(
@@ -452,6 +453,9 @@ def create_model(args):
     kwargs = ckpt["kwargs"]
     kwargs.update({"device": args.device, "args": args, "is_train": False})
     kwargs_tensors_to_device(kwargs, args.device)
+
+    if "shadingMode" in kwargs:
+        kwargs.pop("shadingMode")
 
     gridnerf = eval(args.model_name)(**kwargs)  # pylint: disable=W0123
     rm_ddp_prefix_in_state_dict_if_present(ckpt["state_dict"])

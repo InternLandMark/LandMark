@@ -6,23 +6,26 @@ import lpips
 import numpy as np
 import torch
 import wandb
-from tools.config_parser import ArgsParser
-from tools.configs import ArgsConfig
-from tools.render_utils import evaluation, evaluation_static, renderer_fn
-from tools.slurm import get_dp_group, init_comm_groups, init_distributed_mode
-from tools.train_utils import (
-    DatasetInfo,
-    create_model,
-    get_preprocessed_loader,
-    prep_dataset,
-    prep_sampler,
-    prep_testdataset,
-)
-from tools.utils import cal_n_samples, check_args, mse2psnr_npy, n_to_reso, st
 from torch import distributed as dist
 from torch.nn.parallel import DistributedDataParallel as NativeDDP
 from torchvision.utils import save_image
 from tqdm.auto import tqdm
+
+from app.tools.config_parser import ArgsParser
+from app.tools.configs import ArgsConfig
+from app.tools.render_utils import evaluation, evaluation_static, renderer_fn
+from app.tools.slurm import get_dp_group, init_comm_groups, init_distributed_mode
+from app.tools.train_utils import (
+    DatasetInfo,
+    create_model,
+    create_optimizer,
+    get_preprocessed_loader,
+    prep_dataset,
+    prep_sampler,
+    prep_testdataset,
+    save_optimizer,
+)
+from app.tools.utils import cal_n_samples, check_args, mse2psnr_npy, n_to_reso, st
 
 renderer = renderer_fn
 
@@ -83,6 +86,11 @@ def init_train_env(cmd=None):
 
 
 def train(args):
+    if args.tensorboard and args.rank == 0:
+        from torch.utils.tensorboard import SummaryWriter
+
+        tb_logfolder = f'./runs/{args.expname}{datetime.datetime.now().strftime("-%Y%m%d-%H%M%S")}'
+        writer = SummaryWriter(log_dir=tb_logfolder)
 
     datadir = args.datadir.split("/")[-1]
 
@@ -108,12 +116,20 @@ def train(args):
         logfolder = f"{args.basedir}/{args.expname}"
     args.logfolder = logfolder
 
+    if args.optim_dir is not None:
+        optim_dir = args.optim_dir
+    else:
+        optim_dir = logfolder + "/optim/"
+
     os.makedirs(logfolder, exist_ok=True)
     os.makedirs(f"{logfolder}/imgs_vis", exist_ok=True)
+    os.makedirs(optim_dir, exist_ok=True)
 
     # create model
     gridnerf, reso_cur = create_model(args, dataset_info)
     gridnerf.train()
+
+    ckpt = args.ckpt
 
     # only sequential model and channel parallel model will be wrapped by DDP when using DDP training.
     if args.DDP and (not args.model_parallel or args.channel_parallel):
@@ -142,7 +158,9 @@ def train(args):
     else:
         args.lr_decay_iters = args.n_iters
         lr_factor = args.lr_decay_target_ratio ** (1 / args.n_iters)
-    optimizer = torch.optim.Adam(grad_vars, betas=(0.9, 0.99))
+
+    # create optimizer
+    optimizer = create_optimizer(grad_vars, args)
 
     update_alphamask_list = args.update_AlphaMask_list
 
@@ -159,6 +177,8 @@ def train(args):
             )
         ).long()
     ).tolist()[1:]
+    print(f"upsamp_list: {upsamp_list}")
+    print(f"n_voxel_list: {n_voxel_list}")
 
     torch.cuda.empty_cache()
     psnrs, psnrs_nerf, psnrs_test = [], [], [0]
@@ -324,6 +344,8 @@ def train(args):
             total_loss += torch.mean(all_ret["distort_loss"])
             if "distort_loss1" in all_ret:
                 total_loss += torch.mean(all_ret["distort_loss1"])
+            if "distort_loss_nerf" in all_ret:
+                total_loss += torch.mean(all_ret["distort_loss_nerf"])
 
         optimizer.zero_grad()
         total_loss.backward()
@@ -398,6 +420,17 @@ def train(args):
             if train_model.run_nerf:
                 wandb.log({"Train/PSNR_nerf": nerf_psnr}, step=iteration)
 
+        if args.tensorboard and args.rank == 0:
+            repre_lr = optimizer.param_groups[0]["lr"]
+            writer.add_scalar("Train/Loss", loss, iteration)
+            writer.add_scalar("Train/PSNR", psnr, iteration)
+            writer.add_scalar("Test/PSNR", psnrs_test[-1], iteration)
+            writer.add_scalar("Train/tf_new_lrate", repre_lr, iteration)
+            if enable_lpips:
+                writer.add_scalar("Train/LPIPSLoss", lpips_loss, iteration)
+            if train_model.run_nerf:
+                writer.add_scalar("Train/PSNR_nerf", nerf_psnr, iteration)
+
         if iteration % args.vis_every == args.vis_every - 1 and args.N_vis != 0:
             prtx = f"{iteration:06d}_"
             gridnerf.eval()
@@ -433,6 +466,10 @@ def train(args):
                         train_model.save(f"{logfolder}/{args.expname}-sub{args.rank}.th")
                         print("render saved to", f"{logfolder}/imgs_vis/")
 
+                        opt_save_path = f"{optim_dir}/{args.expname}_opt-sub{args.rank}.th"
+                        print(f"optimizer save to {optim_dir}")
+                        save_optimizer(optimizer, opt_save_path)
+
                         for i in [0]:
                             save_image(
                                 den_plane[i].permute(1, 0, 2, 3),
@@ -446,6 +483,11 @@ def train(args):
                     if args.rank == 0:
                         train_model.save(f"{logfolder}/{args.expname}.th")
                         print("render saved to", f"{logfolder}/imgs_vis/")
+
+                        opt_save_path = f"{optim_dir}/{args.expname}_opt.th"
+                        print(f"optimizer save to {optim_dir}")
+                        save_optimizer(optimizer, opt_save_path)
+
                         for i in [0]:
                             save_image(
                                 den_plane[i].permute(1, 0, 2, 3),
@@ -455,10 +497,15 @@ def train(args):
                                 app_plane[i].permute(1, 0, 2, 3),
                                 f"{logfolder}/app_plane_{i}.png",
                             )
+
             else:
                 if args.plane_parallel or args.branch_parallel:
                     train_model.save(f"{logfolder}/{args.expname}-sub{args.rank}.th")
                     print("render saved to", f"{logfolder}/imgs_vis/")
+
+                    opt_save_path = f"{optim_dir}/{args.expname}_opt-sub{args.rank}.th"
+                    print(f"optimizer save to {optim_dir}")
+                    save_optimizer(optimizer, opt_save_path)
 
                     for i in [0]:
                         save_image(
@@ -473,6 +520,11 @@ def train(args):
                     if args.rank == 0:
                         train_model.save(f"{logfolder}/{args.expname}.th")
                         print("render saved to", f"{logfolder}/imgs_vis/")
+
+                        opt_save_path = f"{optim_dir}/{args.expname}_opt.th"
+                        print(f"optimizer save to {optim_dir}")
+                        save_optimizer(optimizer, opt_save_path)
+
                         for i in [0]:
                             save_image(
                                 train_model.density_plane[i].permute(1, 0, 2, 3),
@@ -482,9 +534,10 @@ def train(args):
                                 train_model.app_plane[i].permute(1, 0, 2, 3),
                                 f"{logfolder}/app_plane_{i}.png",
                             )
+
             gridnerf.train()
 
-        if not args.ckpt and not train_model.run_nerf:
+        if not ckpt and not train_model.run_nerf:
             increase_alpha_thresh = 0
             if iteration in update_alphamask_list:
                 if reso_cur[0] * reso_cur[1] * reso_cur[2] < args.alpha_grid_reso**3:
@@ -495,13 +548,13 @@ def train(args):
                     increase_alpha_thresh += 1
 
         if iteration in upsamp_list:
-            if not args.ckpt:
+            if not ckpt:
                 n_voxels = n_voxel_list.pop(0)
             else:
                 for it in upsamp_list:
                     if iteration >= it:
                         n_voxels = n_voxel_list.pop(0)
-                args.ckpt = None
+                ckpt = None
             reso_cur = n_to_reso(n_voxels, train_model.aabb)
             nsamples = min(args.nSamples, cal_n_samples(reso_cur, args.step_ratio))
             train_model.upsample_volume_grid(reso_cur)
@@ -578,6 +631,11 @@ def train(args):
             if args.rank == 0:
                 train_model.save(f"{logfolder}/{args.expname}.th")
 
+    if args.rank == 0:
+        opt_save_path = f"{logfolder}/{args.expname}_opt.th"
+        print(f"save optimizer to {opt_save_path}")
+        save_optimizer(optimizer, opt_save_path)
+
     folder = f"{logfolder}/imgs_test_all"
     os.makedirs(folder, exist_ok=True)
     gridnerf.eval()
@@ -595,6 +653,8 @@ def train(args):
     )
     all_psnr = np.mean(psnrs_test)
     print(f"======> {args.expname} test all psnr: {all_psnr} <========================")
+    if args.tensorboard and args.rank == 0:
+        writer.close()
     return all_psnr
 
 

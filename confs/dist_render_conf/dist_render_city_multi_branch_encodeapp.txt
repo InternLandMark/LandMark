@@ -1,5 +1,5 @@
-datadir = 2
-partition = almost_all
+datadir = 2/almost_all
+# datadir = 2/almost_all/all_block_render_test          # for all_block_render_test
 subfolder = []
 dataroot = /mnt/petrelfs/share_data/landmarks/train_data/base/sh_city/
 expname = west_x5_resMode1-2-4_branch_parallel_encode_app

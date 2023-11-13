@@ -1,9 +1,9 @@
 import os
 
-from tools.config_parser import ArgsParser
-from tools.configs import ArgsConfig
-from tools.dataloader import dataset_dict
-from tools.slurm import init_distributed_mode
+from .config_parser import ArgsParser
+from .configs import ArgsConfig
+from .dataloader import dataset_dict
+from .slurm import init_distributed_mode
 
 if __name__ == "__main__":
 

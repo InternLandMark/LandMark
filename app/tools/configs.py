@@ -1,3 +1,4 @@
+import copy
 from typing import Any, List, Tuple
 
 
@@ -68,6 +69,9 @@ class ArgsConfig(PrintableConfig):
 
     config_saving_path = "~/landmark/test_config.txt"
     training_config.save_config(config_saving_path)
+    training_config.a = 5
+    print(str(training_config))
+
     """
 
     IGNORE_ATTR_NAME = "config_list"
@@ -77,7 +81,7 @@ class ArgsConfig(PrintableConfig):
         self.config_list = [PrintableConfig(args) for args in args_list]
 
     def save_config(self, file_path):
-        all_attrs = vars(self)
+        all_attrs = copy.deepcopy(vars(self))
         for config in self.config_list:
             all_attrs.update(vars(config))
 

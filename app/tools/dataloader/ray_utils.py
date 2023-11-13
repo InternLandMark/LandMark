@@ -139,25 +139,31 @@ def load_json_drone_data(root_dir, split, image_scale, subfolder=None, debug=Fal
         print("using data from", subfolder)
         meta["frames"] = [f for f in meta["frames"] if f["file_path"].split("/")[-2] in subfolder]
 
-    pfx = ".JPG" if image_scale == 1 else ".png"
     imgfolder = os.path.join(root_dir, f"images_{image_scale}")
-    fnames = [
-        frame["file_path"].split("/")[-2] + "/" + frame["file_path"].split("/")[-1].split(".")[0] + pfx
-        for frame in meta["frames"]
-    ]
-    poses = np.stack([np.array(frame["transform_matrix"]) for i, frame in enumerate(meta["frames"])])
 
-    img0 = cv2.imread(os.path.join(imgfolder, fnames[0]), cv2.IMREAD_UNCHANGED)  # [H, W, 3] o [H, W, 4]
+    fnames = [frame["file_path"] for frame in meta["frames"]]
+    poses = np.stack([np.array(frame["transform_matrix"]) for frame in meta["frames"]])
+
+    if "fl_x" in meta:
+        focals = np.array(meta["fl_x"])  # use SIMPLE_PINHOLE model and single focal
+        print("Single Focal Found in Json!")
+    else:
+        focals = np.stack(
+            [np.array(frame["fl_x"]) for frame in meta["frames"]]
+        )  # use SIMPLE_PINHOLE model and different focals
+        print("Multiple Focals Found in Json!")
+
+    img0 = cv2.imread(os.path.join(fnames[0]), cv2.IMREAD_UNCHANGED)  # [H, W, 3] o [H, W, 4]
     H, W = img0.shape[:2]
-    focal = meta["fl_x"] * (10 / image_scale)  # use SIMPLE_PINHOLE model
 
     if debug:
         fnames = fnames[::50]
         poses = poses[::50]
     return {
         "poses": poses,
+        "focals": focals,
         "fnames": fnames,
-        "hwf": [H, W, focal],
+        "hw": [H, W],
         "imgfolder": imgfolder,
     }
 

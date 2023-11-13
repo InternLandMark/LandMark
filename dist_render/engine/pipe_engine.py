@@ -3,10 +3,11 @@ import time
 from queue import Empty
 from threading import Thread
 
-from comm.env import EnvSetting
-from comm.types import RunnerType
-from engine.render_engine import BaseMainRankRenderEngine
 from PIL import Image as im
+
+from dist_render.comm.env import EnvSetting
+from dist_render.comm.types import RunnerType
+from dist_render.engine.render_engine import BaseMainRankRenderEngine
 
 
 class MainRankPipeRenderEngine(BaseMainRankRenderEngine):
@@ -21,6 +22,7 @@ class MainRankPipeRenderEngine(BaseMainRankRenderEngine):
         self.runner = None
         self.completion_thread = None
         self.completion_map = {}
+        self.lazy_save = True
 
     def start(self, test=False):
         """
@@ -59,7 +61,8 @@ class MainRankPipeRenderEngine(BaseMainRankRenderEngine):
         """
         start the pipeline with model creation.
         """
-        for pose in self.poses[:pose_num]:
+        pose = self.poses[0]
+        for _ in range(pose_num):
             uid = self.submit(pose)
             if self.async_:
                 _ = self.wait(uid)
@@ -76,21 +79,42 @@ class MainRankPipeRenderEngine(BaseMainRankRenderEngine):
             self.runner.wait_stop()
             if self.completion_thread is not None:
                 self.completion_thread.join()
-        print("Stop sucessfully")
+        print(f"rank {EnvSetting.RANK}, Stop sucessfully", flush=True)
 
     def run_for_latency(self):
         """
         test latency using city dataset.
         """
         latency = []
-        for single_pose in self.poses:
+        print(f"len(self.poses) = {len(self.poses)}", flush=True)
+
+        lazy_img_list = []
+        self.poses = self.poses[:100]
+        for idx, single_pose in enumerate(self.poses):
             last_time = time.time()
             uid = self.submit(single_pose)
             if self.async_:
-                _ = self.wait(uid)
+                nerf_out = self.wait(uid)
             else:
-                _ = self.runner.get_result()
+                nerf_out = self.runner.get_result()
             latency.append(time.time() - last_time)
+            if self.save_png:
+                if self.lazy_save:
+                    lazy_img_list.append(nerf_out)
+                else:
+                    im_png = im.fromarray(nerf_out)
+                    cur_png_path = os.path.join(self.save_path, f"{idx}.png")
+                    im_png.save(cur_png_path)
+                    print(cur_png_path, " saved.", flush=True)
+            else:
+                print(f"{idx} img done. one frame latency = {latency[-1]}", flush=True)
+
+        if self.save_png and self.lazy_save:
+            for idx, nerf_out in enumerate(lazy_img_list):
+                im_png = im.fromarray(nerf_out)
+                cur_png_path = os.path.join(self.save_path, f"{idx}.png")
+                im_png.save(cur_png_path)
+                print(cur_png_path, " saved.", flush=True)
 
         if len(latency) > 0:
             print("Latency:", sum(latency) / len(latency), flush=True)
@@ -136,7 +160,7 @@ class MainRankPipeRenderEngine(BaseMainRankRenderEngine):
         # warm up
         self.warm_up()
 
-        self.run_for_throughput()
+        # self.run_for_throughput()
         self.run_for_latency()
 
         self.stop()

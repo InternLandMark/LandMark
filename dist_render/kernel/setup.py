@@ -276,3 +276,31 @@ setup(
     ],
     cmdclass={"build_ext": BuildExtension},
 )
+
+
+setup(
+    name="grid_sample_3d_ndhwc2ncdhw",
+    ext_modules=[
+        CUDAExtension(
+            "grid_sample_3d_ndhwc2ncdhw",
+            sources=[
+                kernel_dir + "densityappfeature/grid_sampler_3d_ndhwc.cpp",
+                kernel_dir + "densityappfeature/grid_sampler_3d_ndhwc_kernel.cu",
+            ],
+            include_dirs=[
+                python_env_include_path,
+                os.path.join(cutlass_dir + "dependecies/cutlass/include"),
+                os.path.join(cutlass_dir + "dependecies/cutlass/tools/util/include"),
+                os.path.join(cutlass_dir + "include"),
+            ],
+            extra_compile_args={
+                "cxx": ["-std=c++17", "-O3"],
+                "nvcc": [
+                    "-std=c++17",
+                    "--gpu-architecture=sm_80",
+                ],
+            },
+        ),
+    ],
+    cmdclass={"build_ext": BuildExtension},
+)

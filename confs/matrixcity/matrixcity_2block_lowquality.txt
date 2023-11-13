@@ -35,7 +35,6 @@ n_lamb_sigma = [16,16,16]
 n_lamb_sh    = [48,48,48]
 
 fea2denseAct = relu
-shadingMode = MLP_Fea
 
 view_pe = 2
 fea_pe = 2

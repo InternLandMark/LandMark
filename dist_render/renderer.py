@@ -3,20 +3,21 @@ import os
 import configargparse
 import numpy as np
 import torch
-from comm.env import EnvSetting
-from comm.types import DatasetType, EngineType, ModelType
-from ddp_infer.config_parser import parse_nerf_config_args
-from ddp_infer.context import NerfContext
-from ddp_infer.nerf_inferer import GlobalArgsManager
-from engine.ddp_engine import MainRankDDPRenderEngine
-from engine.pipe_engine import MainRankPipeRenderEngine
-from engine.render_engine import OtherRankRenderEngine
+
+from dist_render.comm.env import EnvSetting
+from dist_render.comm.global_args import GlobalArgsManager
+from dist_render.comm.types import DatasetType, EngineType, ModelType
+from dist_render.ddp_infer.config_parser import parse_nerf_config_args
+from dist_render.ddp_infer.context import NerfContext
+from dist_render.engine.ddp_engine import MainRankDDPRenderEngine
+from dist_render.engine.pipe_engine import MainRankPipeRenderEngine
+from dist_render.engine.render_engine import OtherRankRenderEngine
 
 
 def launch(
     engine_type=EngineType.PipeEngine,
     model_type=ModelType.Torch,
-    dataset=DatasetType.CityPart,
+    dataset=DatasetType.City,
     use_multistream=False,
     test=False,
     save_png=False,
@@ -82,7 +83,7 @@ def change_mode(mode: str):
         assert False, f"No such mode :{mode}"
 
 
-def adjust_nerf_context(config_path, model_path, aabb, render_batch_size, alpha_mask_filter_thre):
+def adjust_nerf_context(config_path, model_path, aabb, render_batch_size, alpha_mask_filter_thre, dataroot=None):
     """
     adjust nerf context attrs according to configs parse from user.
 
@@ -94,8 +95,12 @@ def adjust_nerf_context(config_path, model_path, aabb, render_batch_size, alpha_
         alpha_mask_filter_thre(float): nerf alpha mask filter threshold.
     """
     assert config_path is not None
+    print(f"config_path = {config_path}", flush=True)
     assert os.path.exists(config_path)
-    NerfContext.args_nerf = parse_nerf_config_args(cmd=f"--config {config_path}")
+    cmd = f"--config {config_path} "
+    if dataroot is not None:
+        cmd += f"--dataroot {dataroot}"
+    NerfContext.args_nerf = parse_nerf_config_args(cmd=cmd)
 
     if model_path is not None:
         assert os.path.exists(model_path)
@@ -124,13 +129,13 @@ def adjust_nerf_context(config_path, model_path, aabb, render_batch_size, alpha_
             setattr(NerfContext.args_nerf, name, getattr(NerfContext, name))
 
 
-def engine_config_parser():
+def engine_config_parser(cmd=None):
     """
     parse engine configs from user.
     """
     parser = configargparse.ArgumentParser()
 
-    parser.add_argument("--dataset", type=str, default="CityPart")
+    parser.add_argument("--dataset", type=str, default="City")
     parser.add_argument("--model_type", type=str, default="MultiBlock4KTensorParallelEncAppTorch")
     parser.add_argument("--use_multistream", default=False, action="store_true")
     parser.add_argument("--test", default=True, action="store_true")
@@ -143,7 +148,7 @@ def engine_config_parser():
     parser.add_argument("--render_batch_size", type=int, default=None)
     parser.add_argument("--alpha_mask_filter_thre", type=float, default=None)
 
-    return parser.parse_args()
+    return parser.parse_args(cmd)
 
 
 def check_model_type(m_type):
@@ -158,10 +163,44 @@ def check_model_type(m_type):
         ModelType.MultiBlockKernelFusion,
         ModelType.MultiBlockTensorParallelTorch,
         ModelType.MultiBlockTensorParallelKernelFusion,
+        ModelType.MovingAreaTorch,
     ]:
         assert NerfContext.args_nerf.branch_parallel, "The model should be trained by branch parallel"
     elif m_type in [ModelType.Torch, ModelType.TorchKernelFusion]:
         assert not NerfContext.args_nerf.branch_parallel, "The model should not be trained by branch parallel"
+
+
+def adjust_dist_render_nerf_context(config_path, model_path, aabb, render_batch_size, alpha_mask_filter_thre, dataroot):
+    assert config_path is not None
+    print(f"config_path = {config_path}", flush=True)
+    assert os.path.exists(config_path)
+    NerfContext.args_nerf = parse_nerf_config_args(cmd=f"--config {config_path} --dataroot {dataroot}")
+
+    if model_path is not None:
+        assert os.path.exists(model_path)
+        NerfContext.model_path = model_path
+    elif model_path is None and NerfContext.model_path is None:
+        assert os.path.exists(NerfContext.args_nerf.ckpt)
+        NerfContext.model_path = NerfContext.args_nerf.ckpt
+
+    if aabb is not None:
+        aabb = np.array(eval(aabb))  # pylint: disable=W0123
+        NerfContext.aabb = torch.from_numpy(aabb).float()
+
+    if render_batch_size is not None:
+        NerfContext.render_batch_size = render_batch_size
+
+    if alpha_mask_filter_thre is not None:
+        NerfContext.alpha_mask_filter_thre = alpha_mask_filter_thre
+
+    assert NerfContext.args_nerf
+    assert NerfContext.model_path
+
+    NerfContext.args_nerf.ckpt = NerfContext.model_path
+    to_cover = ["half_precision_param", "sampling_opt", "render_batch_size", "alpha_mask_filter_thre"]
+    for name in to_cover:
+        if hasattr(NerfContext, name) and getattr(NerfContext, name) is not None:
+            setattr(NerfContext.args_nerf, name, getattr(NerfContext, name))
 
 
 if __name__ == "__main__":

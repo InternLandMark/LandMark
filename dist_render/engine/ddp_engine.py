@@ -1,9 +1,10 @@
 import os
 import time
 
-from comm.types import DatasetType, ModelType, RunnerType
-from engine.render_engine import BaseMainRankRenderEngine
 from PIL import Image as im
+
+from dist_render.comm.types import DatasetType, ModelType, RunnerType
+from dist_render.engine.render_engine import BaseMainRankRenderEngine
 
 
 class MainRankDDPRenderEngine(BaseMainRankRenderEngine):

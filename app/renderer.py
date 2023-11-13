@@ -3,11 +3,12 @@ import os
 
 import numpy as np
 import torch
-from tools.config_parser import ArgsParser
-from tools.configs import ArgsConfig
-from tools.dataloader import dataset_dict
-from tools.render_utils import create_model, evaluation, renderer_fn
-from tools.slurm import init_distributed_mode
+
+from app.tools.config_parser import ArgsParser
+from app.tools.configs import ArgsConfig
+from app.tools.dataloader import dataset_dict
+from app.tools.render_utils import create_model, evaluation, renderer_fn
+from app.tools.slurm import init_distributed_mode
 
 
 def init_render_env(cmd=None):

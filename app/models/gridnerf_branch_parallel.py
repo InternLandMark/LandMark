@@ -5,10 +5,11 @@ import sys
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from tools.slurm import get_dp_group
-from tools.utils import rm_redundant_words_in_state_dict
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm.auto import tqdm
+
+from app.tools.slurm import get_dp_group
+from app.tools.utils import rm_redundant_words_in_state_dict
 
 from .comm import AllGather
 from .gridnerf_parallel import GridBaseParallel, WrapParam
@@ -97,7 +98,7 @@ class GridNeRFBranchParallel(GridBaseParallel):
         else:
             # set gridsize according to ckpt, since the scale relationship between different planes is broken
             # when using merged ckpts trained by plane parallel
-            ckpt = torch.load(self.args.ckpt, map_location=self.args.device)
+            ckpt = torch.load(self.args.ckpt, map_location="cpu")
             rm_redundant_words_in_state_dict(ckpt["state_dict"], [".module", ".params"])
             for i in range(len(self.vecMode)):
                 for j in range(len(self.resMode)):
@@ -510,17 +511,6 @@ class GridNeRFBranchParallel(GridBaseParallel):
                     merged_ckpt["state_dict"][key] = stack_tensor
                     gridShape[key] = stack_tensor.shape
 
-            # # remove '.module'
-            # new_key = key
-            # m_begin = new_key.find(".module")
-            # if m_begin > -1:
-            #     new_key = new_key[:m_begin] + new_key[m_begin + 7 :]
-            # # remove '.params'
-            # l_begin = new_key.find(".params")
-            # if l_begin > -1:
-            #     new_key = new_key[:l_begin] + new_key[l_begin + 7 :]
-            # merged_ckpt["state_dict"][new_key] = merged_ckpt["state_dict"].pop(key)
-
         rm_redundant_words_in_state_dict(merged_ckpt["state_dict"], [".module", ".params"])
 
         new_gridSize = [
@@ -536,6 +526,21 @@ class GridNeRFBranchParallel(GridBaseParallel):
         merged_ckpt["gridShape"] = gridShape
         torch.save(merged_ckpt, merged_ckpt_fp)
 
+        # save ckpt without plane for dynamic load rendering
+        merged_ckpt["state_dict"].pop("density_plane.0")
+        merged_ckpt["state_dict"].pop("app_plane.0")
+        try:
+            merged_ckpt["state_dict"].pop("density_plane.1")
+            merged_ckpt["state_dict"].pop("density_plane.2")
+            merged_ckpt["state_dict"].pop("app_plane.1")
+            merged_ckpt["state_dict"].pop("app_plane.2")
+        except KeyError:
+            pass
+
+        wo_plane_ckpt_fp = merged_ckpt_fp[:-3] + "-wo_plane.th"
+        torch.save(merged_ckpt, wo_plane_ckpt_fp)
+
+        # save ckpt without state_dict, that is kwargs, for model initialization
         merged_ckpt.pop("state_dict")
         kwargs_fp = merged_ckpt_fp[:-3] + "-wo_state_dict.th"
         torch.save(merged_ckpt, kwargs_fp)

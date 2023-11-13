@@ -40,14 +40,13 @@ class CityDataset(BaseDataset):
             subfolder=self.args.subfolder,
             debug=self.debug,
         )
-        poses, fnames, hwf, imgfolder = meta.values()
+        poses, focals, fnames, hw, imgfolder = meta.values()
         N = len(poses)
         idxs = list(range(0, N))
 
-        H, W, focal = hwf
+        H, W = hw
 
         self.img_wh = [W, H]
-        directions = get_ray_directions_blender(int(H), int(W), (focal, focal))
 
         if self.lpips:
             ps = self.patch_size
@@ -62,11 +61,16 @@ class CityDataset(BaseDataset):
 
         for i in tqdm(idxs):
             pose = torch.FloatTensor(poses[i])
+            focal = focals
             f_path = os.path.join(imgfolder, fnames[i])
             self.poses.append(pose)
             self.image_paths.append(f_path)
 
             img = read_Image(f_path, self.transform)
+            if len(focal) == 1:
+                directions = get_ray_directions_blender(int(H), int(W), (focal, focal))
+            else:
+                directions = get_ray_directions_blender(int(H), int(W), (focal[i], focal[i]))
             rays_o, rays_d = get_rays_with_directions(directions, pose)
 
             if self.lpips and self.split == "train":
@@ -107,13 +111,12 @@ class CityDataset(BaseDataset):
             subfolder=self.args.subfolder,
             debug=self.debug,
         )
-        poses, fnames, hwf, imgfolder = meta.values()
+        poses, focals, fnames, hw, imgfolder = meta.values()
         N = len(poses)
         idxs = list(range(0, N))
 
-        H, W, focal = hwf
+        H, W = hw
         self.img_wh = [W, H]
-        directions = get_ray_directions_blender(int(H), int(W), (focal, focal))
 
         chunk_size = len(idxs) // split_num  # split_num = 20
         chunk_list = []
@@ -132,11 +135,16 @@ class CityDataset(BaseDataset):
             part_idxs = []
             for i in partial_list:
                 pose = torch.FloatTensor(poses[i])
+                focal = focals
                 f_path = os.path.join(imgfolder, fnames[i])
                 self.poses.append(pose)
                 self.image_paths.append(f_path)
 
                 img = read_Image(f_path, self.transform)
+                if len(focal) == 1:
+                    directions = get_ray_directions_blender(int(H), int(W), (focal, focal))
+                else:
+                    directions = get_ray_directions_blender(int(H), int(W), (focal[i], focal[i]))
                 rays_o, rays_d = get_rays_with_directions(directions, pose)
 
                 part_rgbs += [img]
@@ -297,13 +305,12 @@ class CityDataset(BaseDataset):
             subfolder=self.args.subfolder,
             debug=self.debug,
         )
-        poses, fnames, hwf, imgfolder = meta.values()
+        poses, focals, fnames, hw, imgfolder = meta.values()
         N = len(poses)
         idxs = list(range(0, N))
 
-        H, W, focal = hwf
+        H, W = hw
         self.img_wh = [W, H]
-        directions = get_ray_directions_blender(int(H), int(W), (focal, focal))
 
         chunk_size = len(idxs) // args.world_size  # split_num = 20
         chunk_list = []
@@ -318,11 +325,16 @@ class CityDataset(BaseDataset):
         part_idxs = []
         for i in partial_list:
             pose = torch.FloatTensor(poses[i])
+            focal = focals
             f_path = os.path.join(imgfolder, fnames[i])
             self.poses.append(pose)
             self.image_paths.append(f_path)
 
             img = read_Image(f_path, self.transform)
+            if len(focal) == 1:
+                directions = get_ray_directions_blender(int(H), int(W), (focal, focal))
+            else:
+                directions = get_ray_directions_blender(int(H), int(W), (focal[i], focal[i]))
             rays_o, rays_d = get_rays_with_directions(directions, pose)
 
             part_rgbs += [img]

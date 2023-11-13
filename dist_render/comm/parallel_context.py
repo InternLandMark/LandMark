@@ -3,8 +3,9 @@ import os
 from enum import Enum
 
 import torch
-from comm.env import EnvSetting
-from comm.singleton import SingletonMeta
+
+from dist_render.comm.env import EnvSetting
+from dist_render.comm.singleton import SingletonMeta
 
 
 class ParallelGroup(Enum):
@@ -25,12 +26,13 @@ class ParallelContext(metaclass=SingletonMeta):
     Parallel context for torch distribution.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, tp_group_close=True) -> None:
         self._global_rank = 0
         self._world_size = 0
         self._tensor_parallel_size = 1
         self._data_parallel_size = 0
-        self._node_cuda_num = 8
+        self._node_cuda_num = torch.cuda.device_count()
+        self._tp_group_close = tp_group_close
         # Build communication groups
         self._groups = {}
 
@@ -60,7 +62,7 @@ class ParallelContext(metaclass=SingletonMeta):
                 timeout=datetime.timedelta(0, timeout),
             )
             torch.distributed.barrier()
-            torch.cuda.set_device(f"cuda:{rank%8}")
+            torch.cuda.set_device(f"cuda:{rank%self._node_cuda_num}")
 
     def init_distributed(self, world_size=None, rank=None, backend="nccl", dist_url="env://", timeout=1800):
         """
@@ -87,6 +89,8 @@ class ParallelContext(metaclass=SingletonMeta):
             local_rank_value(int): loal rank value.
             register_force(bool): whether to record group info forcely.
         """
+        if self.get_rank() == 0:
+            print(f"group_ranks:{group_ranks}, parallel_group:{parallel_group}")
         process_group = torch.distributed.new_group(group_ranks)
         if self.get_rank() in group_ranks:
             group_info = {}
@@ -111,6 +115,8 @@ class ParallelContext(metaclass=SingletonMeta):
         Args:
             tensor_parallel_size(int): tensor parallel group world size.
         """
+        if self.get_rank() == 0:
+            print(f"[DEBUG] init_groups: _tp_group_close={self._tp_group_close}, tp_size={tensor_parallel_size}")
         self._tensor_parallel_size = tensor_parallel_size
 
         # All processes group
@@ -120,31 +126,45 @@ class ParallelContext(metaclass=SingletonMeta):
         # Data parallel processes group
         self._data_parallel_size = self.get_world_size() // self._tensor_parallel_size
         if self._data_parallel_size >= 1:
-            global_ranks = [i * self._tensor_parallel_size for i in range(self._data_parallel_size)]
+            if self._tp_group_close:
+                global_ranks = [i * self._tensor_parallel_size for i in range(self._data_parallel_size)]
+            else:
+                global_ranks = list(range(self._data_parallel_size))
             self.register_group(global_ranks, ParallelGroup.ProcessesInDataParalGroup, register_force=True)
 
-        if self._tensor_parallel_size > 1:
-            # Tensor parallel group
-            assert self.get_world_size() % self._tensor_parallel_size == 0
-            tensor_parallel_group_num = self.get_world_size() // self._tensor_parallel_size
-            for i in range(tensor_parallel_group_num):
+        # Processes per node
+        node_group_num = self.get_world_size() // self._node_cuda_num
+        for i in range(node_group_num):
+            global_ranks = [j + i * self._node_cuda_num for j in range(self._node_cuda_num)]
+            self.register_group(global_ranks, ParallelGroup.ProcessesPerNode)
+
+        tensor_parallel_group_num = self.get_world_size() // self._tensor_parallel_size
+        # Tensor parallel group
+        assert self.get_world_size() % self._tensor_parallel_size == 0
+        for i in range(tensor_parallel_group_num):
+            if self._tp_group_close:
                 global_ranks = [j + i * self._tensor_parallel_size for j in range(self._tensor_parallel_size)]
-                self.register_group(global_ranks, ParallelGroup.ProcessesInTenParalGroup)
+            else:
+                global_ranks = [i + j * self._data_parallel_size for j in range(self._tensor_parallel_size)]
+            self.register_group(global_ranks, ParallelGroup.ProcessesInTenParalGroup)
 
             # Processes per tensor parallel rank0
+        if self._tp_group_close:
             global_ranks = [i * self._tensor_parallel_size for i in range(tensor_parallel_group_num)]
-            self.register_group(global_ranks, ParallelGroup.ProcessesPerTenParalRank0)
+        else:
+            global_ranks = list(range(tensor_parallel_group_num))
+        self.register_group(global_ranks, ParallelGroup.ProcessesPerTenParalRank0)
 
-            # Processes of same tensor parallel local rank on all nodes
-            for i in range(self._tensor_parallel_size):
+        # Processes of same tensor parallel local rank on all nodes
+        for i in range(self._tensor_parallel_size):
+            if self._tp_group_close:
                 global_ranks = [i + j * self._tensor_parallel_size for j in range(tensor_parallel_group_num)]
-                self.register_group(global_ranks, ParallelGroup.ProcessesSameLocalRankBetTenParalGroup, i)
+            else:
+                global_ranks = [j + i * self._data_parallel_size for j in range(tensor_parallel_group_num)]
+            self.register_group(global_ranks, ParallelGroup.ProcessesSameLocalRankBetTenParalGroup, i)
 
-            # Processes per node
-            node_group_num = self.get_world_size() // self._node_cuda_num
-            for i in range(node_group_num):
-                global_ranks = [j + i * self._node_cuda_num for j in range(self._node_cuda_num)]
-                self.register_group(global_ranks, ParallelGroup.ProcessesPerNode)
+    def is_in_group(self, parallel_group):
+        return self._groups[parallel_group]["local_rank"] is not None
 
     def is_group0(self, parallel_group=ParallelGroup.ProcessesInTenParalGroup):
         """
@@ -161,6 +181,9 @@ class ParallelContext(metaclass=SingletonMeta):
         check whether current process group is the first rank in the given group.
         """
         return self.get_rank() == self.get_group_src_rank(parallel_group=parallel_group)
+
+    def is_group_rank_i(self, idx, parallel_group=ParallelGroup.AllProcesses):
+        return self.get_rank() == self._groups[parallel_group]["ranks_in_group"][idx]
 
     def get_group(self, parallel_group=ParallelGroup.AllProcesses):
         """
@@ -185,6 +208,9 @@ class ParallelContext(metaclass=SingletonMeta):
         get local rank of the given parallel group.
         """
         return self._groups[parallel_group]["local_rank"]
+
+    def get_kth_member(self, parallel_group, k):
+        return self._groups[parallel_group]["ranks_in_group"][k]
 
     def get_rank(self):
         """

@@ -25,6 +25,13 @@ class AlphaGridMask(torch.nn.Module):
             self.device
         )
 
+    def update_device(self, device):
+        self.device = device
+        self.aabb = self.aabb.to(device)
+        self.invgridSize = self.invgridSize.to(device)
+        self.gridSize = self.gridSize.to(device)
+        self.alpha_volume = self.alpha_volume.to(device)
+
     def sample_alpha(self, xyz_sampled):
         """
         Samples the alpha values.

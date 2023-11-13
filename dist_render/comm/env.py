@@ -41,6 +41,8 @@ class EnvSetting:
     SLURM = "SLURM_PROCID" in os.environ
     NCCL_TIMEOUT = int(os.environ.get("NCCL_TIMEOUT", 1800))
 
+    CI_TEST_PICTURES = int(os.environ.get("CI_TEST_PICTURES", -1))
+
     if SLURM:
         # slurm cluster
         os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "29501")  # 29500

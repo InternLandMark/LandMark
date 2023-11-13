@@ -1,0 +1,83 @@
+datadir = 2/almost_all
+# datadir = 2/almost_all/all_block_render_test          # for all_block_render_test
+
+dataroot = /cpfs01/shared/pjlab-lingjun-landmarks/data/sh_city
+expname = west_x5_resMode1-2-4_branch_parallel_encode_app
+downsample_train = 10
+dataset_name = city
+encode_app = 1
+
+resMode = [1,2,4]
+ndims = 1
+sampling_opt = 1
+
+filter_ray = 1
+patch_size = 128
+white_bkgd = 0
+
+add_nerf = 150000
+residnerf = 0
+
+add_dist = 5
+
+batch_size = 81920
+#lr_init = 0.06
+
+N_voxel_init  = 3000000000
+N_voxel_final = 3000000000
+
+upsamp_list = [250000]
+update_AlphaMask_list = [250000]
+alpha_grid_reso = 474552000  #780**3
+progressive_alpha = 0
+nerf_n_importance = 128
+n_importance = 256
+
+lr_decay_iters = 250000
+n_iters = 250000
+
+N_vis = 10
+vis_every = 5000
+
+render_test = 0
+
+n_lamb_sigma = [16,16,16]
+n_lamb_sh    = [48,48,48]
+
+fea2denseAct = relu
+
+view_pe = 2
+fea_pe = 2
+
+L1_weight_inital = 8e-5
+L1_weight_rest = 4e-5
+rm_weight_mask_thre = 1e-4
+
+TV_weight_density = 0.1
+TV_weight_app = 0.01
+
+###### train parallel ######
+block_parallel = 1
+plane_division = [8,6]
+
+###### render configs ######
+test_all = 1
+ckpt=/cpfs01/shared/pjlab-lingjun-landmarks/checkpoint/1k_ckpt/2_almostall_1k_bp_div8x6_encodeapp_run2_hull_train2k_hull256_nostratefied/2_almostall_1k_bp_div8x6_encodeapp_run2_hull_train2k_hull256_nostratefied-merged-stack.th
+render_only = 1
+render_test = 1
+render_batch_size = 50000
+all_block_render_test = 1
+compute_extra_metrics = 1
+op_prof = 1
+alpha_mask_filter_thre = 0.5
+
+###### profile ######
+render_profile = 1
+profile_rank0_only = 1
+render_sanity = 1
+baseline_dir = ./results/04_28
+###########################
+
+ckpt_type = full
+
+branch_parallel = 1

@@ -103,7 +103,7 @@ class AbstractMultiBlockParallelCuda:
 
         # by XHR
         # appfeature_cuda = [90w, 27]
-        m = N_rays * 64 #32
+        m = N_rays * 64  # 32
         self._tensorf.density_feature_cuda = torch.zeros((m * 4)).to(self._tensorf.device)
         grid_channel = self._tensorf.app_plane[0].shape[1]
         self._tensorf.plane_mul_line_list = torch.zeros(
@@ -227,8 +227,7 @@ class MultiBlockParallelCuda(AbstractMultiBlockParallelCuda):
             )
 
             valid_samples_num = valid_samples_num[0].item()
-            if(valid_samples_num < 0):
-                valid_samples_num = 0
+            valid_samples_num = max(valid_samples_num, 0)
 
             # valid_samples_num = N_samples - int(tvals_min_index_cuda[0].cpu().item())
 

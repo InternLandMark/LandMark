@@ -1,4 +1,5 @@
 # pylint: disable=W0123,E1102
+import gc
 import os
 import time
 from abc import abstractmethod
@@ -6,16 +7,20 @@ from typing import Callable, Union
 
 import numpy as np
 import torch
-from comm.communication import all_gather, broadcast
-from comm.parallel_context import ParallelContext, ParallelGroup
-from comm.profiler import TPCommunicationProfiler
-from comm.utils import kwargs_tensors_to_device, rm_ddp_prefix_in_state_dict_if_present
-from ddp_infer.editer import Editer
 from psutil import virtual_memory
 
 from app.models.gridnerf_branch_parallel import DistRenderGridNeRFBranchParallel
+from app.models.gridnerf_elastic import DistRenderGridNeRFElastic
 from app.models.gridnerf_sequential import GridNeRF
 from app.models.gridnerf_tensor_parallel import DistRenderGridNeRFTensorParallel
+from dist_render.comm.communication import all_gather, broadcast
+from dist_render.comm.parallel_context import ParallelContext, ParallelGroup
+from dist_render.comm.profiler import TPCommunicationProfiler
+from dist_render.comm.utils import (
+    kwargs_tensors_to_device,
+    rm_ddp_prefix_in_state_dict_if_present,
+)
+from dist_render.ddp_infer.editer import Editer
 
 
 class AbstractDDPInfererImpl:
@@ -262,6 +267,8 @@ class MultiBlockTensorParallelTorchNerfDDPInfererImpl(MultiBlockTorchNerfDDPInfe
 
             self._model = DistRenderGridNeRFTensorParallel(**kwargs)
             self._model.load(ckpt)
+            del ckpt
+            gc.collect()
         else:
             fp_path = self._model_path[:-3] + "-wo_state_dict.th"
             assert os.path.exists(fp_path)
@@ -290,7 +297,10 @@ class KernelFusionNerfDDPInfererImpl(AbstractDDPInfererImpl):
 
     def __init__(self, context) -> None:
         super().__init__(context)
-        from kernel.cuda_render_extend import tensorf_cuda_init, tensorf_part1_cuda
+        from dist_render.kernel.cuda_render_extend import (
+            tensorf_cuda_init,
+            tensorf_part1_cuda,
+        )
 
         self._tensorf = None
         self._density_plane_line_sum_path = context.density_plane_line_sum_path
@@ -333,7 +343,7 @@ class MultiBlockKernelFusionNerfDDPInfererImpl(MultiBlockTorchNerfDDPInfererImpl
 
     def __init__(self, context) -> None:
         super().__init__(context)
-        from kernel.cuda_render_extend import (  # noqa: E402  # pylint: disable=C0413
+        from dist_render.kernel.cuda_render_extend import (  # noqa: E402  # pylint: disable=C0413
             MultiBlockParallelCuda,
         )
 
@@ -362,7 +372,7 @@ class MultiBlockTensorParallelKernelFusionNerfDDPInfererImpl(MultiBlockTensorPar
     def __init__(self, context) -> None:
         super().__init__(context)
 
-        from kernel.cuda_render_extend import (  # noqa: E402  # pylint: disable=C0413
+        from dist_render.kernel.cuda_render_extend import (  # noqa: E402  # pylint: disable=C0413
             TPMultiBlockParallelCuda,
         )
 
@@ -380,3 +390,70 @@ class MultiBlockTensorParallelKernelFusionNerfDDPInfererImpl(MultiBlockTensorPar
 
     def renderer_fn(self, rays, N_samples=-1, white_bg=True, is_train=False, app_code=None):  # pylint: disable=W0613
         return super().renderer_fn(rays, white_bg=white_bg, app_code=app_code)
+
+
+class MovingAreaTorchNerfDDPInfererImpl(AbstractDDPInfererImpl):
+    """
+    Infer operations of multi-block torch model.
+    """
+
+    def __init__(self, context) -> None:
+        super().__init__(context)
+
+        self._model = None
+        self._model_path = context.model_path
+
+    def load_model(self, H, W):
+        local_rank_within_node = ParallelContext().get_local_rank(ParallelGroup.ProcessesPerNode)
+        ckpt_fp = self._model_path
+        if local_rank_within_node != 0:
+            ckpt_fp = self._model_path[:-3] + "-wo_plane.th"
+        ckpt = torch.load(ckpt_fp, map_location="cpu")
+        kwargs = ckpt["kwargs"]
+        kwargs.update({"device": "cpu", "args": self._args, "neighbour_size": self._args.neighbour_size})
+        kwargs = self.remove_old_kwargs(kwargs)
+        kwargs_tensors_to_device(kwargs, self._args.device)
+
+        self._model = DistRenderGridNeRFElastic(**kwargs)  # pylint: disable=W0123
+        rm_ddp_prefix_in_state_dict_if_present(ckpt["state_dict"])
+        self._model.load(ckpt)
+        del ckpt
+        gc.collect()
+        self._model.permute_and_split_model()
+        self._model.update_device(self._args.device)
+
+    def meet_load_threshold(self, pose_o):
+        return self._model.meet_load_threshold(pose_o)
+
+    def switch_buffers(self):
+        return self._model.switch_buffers()
+
+    def init_buffers(self, pose_o, update_plane=False):
+        return self._model.init_buffers(pose_o, update_plane)
+
+    def update_buffers(self, pose_o, nccl_only=False):
+        return self._model.update_buffers(pose_o, nccl_only)
+
+    def renderer_fn(
+        self,
+        rays,
+        N_samples=-1,
+        white_bg=True,
+        is_train=False,
+        app_code=0,
+    ):  # pylint: disable=W0613
+        all_ret = []
+        N_rays_all = rays.shape[0]
+        for chunk_idx in range(N_rays_all // self._chunk_size + int(N_rays_all % self._chunk_size > 0)):
+            rays_chunk = rays[chunk_idx * self._chunk_size : (chunk_idx + 1) * self._chunk_size]
+            ret = self._model(rays_chunk)
+
+            if isinstance(ret, tuple) and "rgb_map" in ret[0]:
+                all_ret.append(ret[0]["rgb_map"])
+            elif "rgb_map" in ret:
+                all_ret.append(ret["rgb_map"])
+            else:
+                print(ret, flush=True)
+                raise Exception("cannot find correct key for ret")
+        all_ret = torch.cat(all_ret, 0)
+        return all_ret

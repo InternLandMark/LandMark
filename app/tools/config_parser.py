@@ -160,9 +160,16 @@ class ArgsParser:
         parser.add_argument(
             "--update_AlphaMask_list", type=int, action="append", help="update alphamask in specific iters"
         )
+        parser.add_argument(
+            "--progressive_alpha", type=int, default=0, help="whether to increase alpha thresh progressively"
+        )
         parser.add_argument("--alpha_grid_reso", type=int, default=256**3, help="max alpha grid resolution")
 
-        parser.add_argument("--wandb", default=False, action="store_true")
+        parser.add_argument("--wandb", default=False, action="store_true", help="show the training details in wandb")
+
+        parser.add_argument(
+            "--tensorboard", default=False, action="store_true", help="show the training details in tensorboard"
+        )
 
         parser.add_argument("--plane_parallel", default=False, action="store_true", help="training in plane parallel")
         parser.add_argument(
@@ -278,6 +285,14 @@ class ArgsParser:
 
         parser.add_argument("--plane_division", type=int, action="append")
 
+        parser.add_argument("--dynamic_fetching", action="store_true", help="whether to use dynamic fetching")
+        parser.add_argument(
+            "--neighbour_size",
+            type=int,
+            default=9,
+            help="useful only when `dynamic_fetching` is True; control the block numbers of single buffer.",
+        )
+
         parser.add_argument("--plane_parallel", default=False, action="store_true", help="training in plane parallel")
 
         parser.add_argument(
@@ -350,6 +365,16 @@ class ArgsParser:
         )
 
         parser.add_argument("--skip_save_imgs", default=False, action="store_true", help="whether to save imgs")
+
+        parser.add_argument(
+            "--optim_dir",
+            type=str,
+            default=None,
+            help=(
+                "the dir to save optimizer. None is disable loading optimizer in resuming. The default save dir of"
+                " optimizer is $basedir/$expname/optim/"
+            ),
+        )
 
         if cmd is not None:
             self.exp_args = parser.parse_known_args(cmd)[0]

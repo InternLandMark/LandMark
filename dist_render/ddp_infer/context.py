@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from comm.env import EnvSetting
+from dist_render.comm.env import EnvSetting
 
 
 @dataclass
@@ -10,9 +10,7 @@ class NerfContext:
     """
 
     args_nerf = None
-    png_saving_path = (
-        "~/landmark/dist_render/picture/" if EnvSetting.PNG_SAVING_PATH is None else EnvSetting.PNG_SAVING_PATH
-    )
+    png_saving_path = "./dist_render/picture/" if EnvSetting.PNG_SAVING_PATH is None else EnvSetting.PNG_SAVING_PATH
     half_precision_param = EnvSetting.HALF_PRECISION_PARAM
     load_orderly = EnvSetting.LOAD_ORDERLY
     enable_edit_mode = EnvSetting.ENABLE_EDIT_MODE

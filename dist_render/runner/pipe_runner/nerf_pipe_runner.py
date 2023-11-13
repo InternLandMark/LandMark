@@ -1,16 +1,24 @@
 from functools import partial
 
 import numpy as np
-from comm.parallel_context import ParallelContext, ParallelGroup, init_parallel_context
-from comm.types import ModelType
-from ddp_infer.nerf_inferer import (
+
+from dist_render.comm.parallel_context import (
+    ParallelContext,
+    ParallelGroup,
+    init_parallel_context,
+)
+from dist_render.comm.types import ModelType
+from dist_render.ddp_infer.nerf_inferer import (
     generate_hw,
     infer,
     model_infer_postprocess,
     model_infer_preprocess,
 )
-from runner.pipe_runner.easy_pipeline.easy_pipe_runner import EasyPipeRunner
-from runner.pipe_runner.easy_pipeline.pipeline import PipelineItem, SimplePipeline
+from dist_render.runner.pipe_runner.easy_pipeline.easy_pipe_runner import EasyPipeRunner
+from dist_render.runner.pipe_runner.easy_pipeline.pipeline import (
+    PipelineItem,
+    SimplePipeline,
+)
 
 
 def transform_pose_to_rays_item(

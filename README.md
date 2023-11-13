@@ -86,14 +86,15 @@ The LandMark supports plenty of features at present:
     - Branch Parallel
     - Plane Parallel
     - Channel Parallel
-- GridNeRF Hybrid Parallel Training with Model Parallel & DDP Training
+- GridNeRF Hybrid Parallel Traning with Model Parallel & DDP Training
 - GridNeRF Sequential Model Rendering
 - Pytorch DDP both on training and rendering
 
 - MatrixCity Datasets Supports
 - Real-time Distributed Rendering System
+- Parameter loader with dynamic fetching to support infinite area
 
-It's highly recommended to read the [DOCUMENTATION](https://internlandmark.github.io/LandMark_Documentation/) about the implementations of our parallel acceleration strategies.
+It's highly recommended to read the [DOCUMENTATION](https://internlandmark.github.io/LandMark_Documentation/) about the implementations of our parallel acceleration and dynamic fetching strategies.
 
 # 🚀 Quickstart
 ## Prerequisites
@@ -102,6 +103,8 @@ You must have a NVIDIA GPU card with [CUDA](https://docs.nvidia.com/cuda/cuda-qu
 The LandMark repository files contains configuration files to help you create a proper environment
 ```
 git clone https://github.com/InternLandMark/LandMark.git
+cd ./LandMark
+export PYTHONPATH=$YOUR_PREFIX_PATH/LandMark/:$PYTHONPATH
 ```
 ## Create Environment
 We recommend using [Conda](https://docs.conda.io/en/latest/miniconda.html) to manage complicated dependencies:
@@ -131,19 +134,53 @@ Large scale scenes captured from the real world are most suitable for our method
 Reform your dataset as the following structure:
 
 - your_dataset/
-    - images_1/
+    - images/
         - image_0.png
         - image_1.png
         - image_2.png
         - ...
+    - transforms_train.json
+    - transforms_test.json
 
-Folder name `images_1/` indicates that the downsample factor is `1` for the images.<br>
+Folder `images/` contains all the images in the training and test sets.<br>
+Camera poses in both multi-focal and single focal length formats are supported in `transforms_xxx.json` <br>
+```
+### single focal example ###
+{
+    "camera_model": "SIMPLE_PINHOLE",
+    "fl_x": 427,
+    "fl_y": 427,
+    "w": 547,
+    "h": 365,
+    "frames": [
+        {
+            "file_path": "./images/image_0.png",
+            "transform_matrix": []
+        }
+    ]
+}
+
+### multi focal example ###
+{
+    "camera_model": "SIMPLE_PINHOLE",
+    "frames": [
+        {
+            "fl_x": 1116,
+            "fl_y": 1116,
+            "w": 1420,
+            "h": 1065,
+            "file_path": "./images/image_0.png",
+            "transform_matrix": []
+        }
+    ]
+}
+```
 Extracting poses and `sparse` point-cloud model using [COLMAP](https://colmap.github.io/) as other NeRF methods.
 Then transfer the poses data using commands below:
 ```
 python app/tools/colmap2nerf.py --recon_dir data/your_dataset/sparse/0 --output_dir data/your_dataset
 ```
-A `transforms_train.json` and a `transforms_test.json` files will be generated in the `your_dataset/` folder.<br>
+A `transforms_train.json` and a `transforms_test.json` files will be generated in the `your_dataset/` folder with `single focal` supported<br>
 Referring to the `app/tools/config_parser.py` and the `app/tools/dataloader/city_dataset.py` for help.<br>
 ## Set Arguments
 We provide a configuration file `confs/city.txt` as an example to help you initialize your experiments.<br>
@@ -162,6 +199,7 @@ Some important arguments are demonstrated here. Don't forget to specify path-rel
     - add_nerf - Which iteration to use nerf brunch
 - render
     - sampling_opt - Whether to use sampling optimization when rendering
+
 - model
     - resMode - Resolution mode in muti-resolution model
 
@@ -183,7 +221,7 @@ The rendering results will be save in `LandMark/log/your_expname/imgs_test_all` 
 ## Directory Structure
 
 - app/
-    - models/ - Contains sequential and parallel implementations of GridNeRF models
+    - models/ - Contains sequential, parallel and dynamic fecthing implementations of GridNeRF models
     - tools/ - Contains dataloaders, train/render utilities
     - tests/ - Contains scripts for integerity test
     - trainer.py - Manage running process for training
@@ -227,9 +265,11 @@ To render with the Parallel model after training, using the command as the seque
 python app/renderer.py --config confs/city_multi_branch_parallel.txt --ckpt=log/your_expname/your_expname.th
 ```
 ## MatrixCity Dataset
+- [Dataset Preparation](#dataset-preparation)
+- [Training with MatrixCity Dataset](#test-with-matrixcity-dataset)
 ### Dataset Preparation
 Fully supports the brilliant MatrixCity dataset. Dedicated files are given for block_1 and block_2 in `confs/matrixcity`. <br>
-It's recommended to download the datases from [BaiduNetDisk](https://pan.baidu.com/s/187P0e5p1hz9t5mgdJXjL1g) (password: `hqnn`).<br>
+It's recommended to download the datases from [OpenXLab](https://openxlab.org.cn/datasets/bdaibdai/MatrixCity) ,or from [BaiduNetDisk](https://pan.baidu.com/s/187P0e5p1hz9t5mgdJXjL1g) (password: `hqnn`).<br>
 The following files are needed to be downloaded and be organized as the original directory structure:
 ```
 MatrixCity/small_city/aerial/train/block_1.tar
@@ -246,22 +286,56 @@ dataroot = YOUR_MATRIXCITY_FOLDER_PATH/small_city/aerial/pose
 datadir = block_A
 dataset_name = matrixcity
 ```
-### Training
+### Test with MatrixCity Dataset
 
-For single GPU training, simply use:
+For single GPU training and rendering, simply use:
 ```
-python app/trainer.py --config confs/matrixcity_2block_multi.txt
+# training
+python app/trainer.py --config confs/matrixcity/matrixcity_2block_multi.txt
+
+# rendering
+python app/renderer.py --config confs/matrixcity/matrixcity_2block_multi.txt --ckpt log/matrix_city_block_1+2_multi/matrix_city_block_1+2_multi.th
+
 ```
-For multi GPU DDP training:
+For multi GPU DDP training and rendering:
 ```
-python -m torch.distributed.launch --nproc_per_node=number_of_GPUs app/trainer.py --config confs/matrixcity_2block_multi.txt
+# training
+python -m torch.distributed.launch --nproc_per_node=number_of_GPUs app/trainer.py --config confs/matrixcity/matrixcity_2block_multi.txt
+
+# single GPU rendering
+python app/renderer.py --config confs/matrixcity/matrixcity_2block_multi.txt --ckpt log/matrix_city_block_1+2_multi/matrix_city_block_1+2_multi.th
+
+# multi GPU rendering
+python -m torch.distributed.launch --nproc_per_node=number_of_GPUs  app/renderer.py --config confs/matrixcity/matrixcity_2block_multi.txt --ckpt log/matrix_city_block_1+2_multi/matrix_city_block_1+2_multi.th
+
 ```
-Other parallel methods are also available:
+Other training parallel methods are also available:
 ```
 python -m torch.distributed.launch --nproc_per_node=number_of_GPUs app/trainer.py --config confs/matrixcity_2block_multi_branch_parallel.txt
 ```
+
+In order to allow users to get started quickly, we provide two [ckpt](https://pan.baidu.com/s/1SeLPYaOV4bAz77XUd1jivA?pwd=abcd), which are trained based on the following two commands:
+
+```
+# matrix_city_block_1+2_multi.th
+python app/trainer.py --config confs/matrixcity/matrixcity_2block_multi.txt
+
+# matrix_city_block_1+2_multi_lowquality.th
+python app/trainer.py --config confs/matrixcity/matrixcity_2block_lowquality.txt
+```
+
+If you want to skip the training phase, you can directly download them and use the following command to rendering.
+
+```
+# matrix_city_block_1+2_multi.th
+python app/renderer.py --config confs/matrixcity/matrixcity_2block_multi.txt --ckpt your_dir/matrix_city_block_1+2_multi.th
+
+# matrix_city_block_1+2_multi_lowquality.th
+python app/renderer.py --config confs/matrixcity/matrixcity_2block_lowquality.txt --ckpt your_dir/matrix_city_block_1+2_multi_lowquality.th
+```
+
 ## Real-Time Distributed Rendering System
-Large-scale real-time distributed rendering system which supports over 100 km^2 scene and over 30 frames per second. Read [dist_render/README.md](./dist_render/README.md) for more detailes
+Large-scale real-time distributed rendering system which supports over 100 km^2 scene and over 30 frames per second. To achieve large area and fast speed, we use multiple optimizations. Read [dist_render/README.md](./dist_render/README.md) for more detailes
 # 🤝 Authors
 The main work comes from the LandMark Team, Shanghai AI Laboratory.<br>
 
