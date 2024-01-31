@@ -4,7 +4,7 @@
 
 # 💻 About
 The codes in this directory implement a distributed rendering system,
-to support real-time(30~ms Latency, 30+FPS) rendering of large scale GridNeRF model(100km2 or bigger) with custom kernels and multiple parallel modes and other optimizations. 
+to support real-time(30~ms Latency, 30+FPS) rendering of large scale GridNeRF model(100km2 or bigger) with custom kernels and multiple parallel modes and other optimizations.
 # 🎨 Features
 - The mixed-mode parallel computation of data parallel and tensor parallel.
 - Pipeline optimization, to overlap preprocess and postprocess.
@@ -30,13 +30,14 @@ This system supports distributed real-time rendering of the following models:
 - GridNeRF model trained with branch parallel and rendering with kernel fusion optimization. We define the model type as `MultiBlockKernelFusion`.
 - GridNeRF model trained with branch parallel and rendering with tensor parallel optimization of computer memory. We define the model type as `MultiBlockTensorParallelTorch`.
 - GridNeRF model trained with branch parallel and rendering with tensor parallel optimization of computer memory and rendering with kernel fusion optimization. We define the model type as `MultiBlockTensorParallelKernelFusion`.
-- GridNeRF model with dynamic fetching.We define the model type as `MovingAreaTorch`.
+- GridNeRF model with dynamic fetching. We define the model type as `MovingAreaTorch`.
+- GridNeRF model with dynamic fetching and rendering with kernel fusion optimization. We define the model type as `MovingAreaCudaKernel`.
 ## Set Arguments
 ### Set Startup Parameter
 Startup Parameter is set after `renderer.py`,like `renderer.py --model_type YOUR_MODEL_TYPE`.
 - model_type: Which model is selected for rendering.Refer to model types listed above.
 - use_multistream: Whether use multiple streams with preprocess and postprocess for pipeline optimization.
-- alpha_mask_filter_thre: Filter samples with alpha that under the threshold, It influences rendering latency. 
+- alpha_mask_filter_thre: Filter samples with alpha that under the threshold, It influences rendering latency.
 - render_batch_size: Chunk size of nerf rays.
 - ckpt: Pytorch ckpt model trained by trainer.
 - save_png: Whether to save picture results in `dist_render/picture/` directory.
@@ -47,7 +48,7 @@ The following parameters could be set in the config file. Some of the startup pa
 - branch_parallel: Whether the model is trained by branch parallel.
 - plane_division: The plane division if the model is trained by branch parallel.
 - sampling_opt: Whether to use sampling optimization when rendering, it's 1 usually.
-- dynamic_fetching: Whether to use dynamic fetching when rendering.Make sure compile kernels before dynamic fetching. Corresponding `model_type`  should be `MovingAreaTorch`.
+- dynamic_fetching: Whether to use dynamic fetching when rendering.Make sure compile kernels before dynamic fetching. Corresponding `model_type`  should be `MovingAreaTorch` or `MovingAreaCudaKernel`.
 - neighbour_size: If use dynamic fetching,the number of blocks for each buffer. Note that only the square of an integer N is supported. N^2^ = 9 and N^2^ = 16 have been tested in 1K model.Larger N is supported and N = 1 is illegal for multiblock-based dynamic fetching.
 
 ### Set Environment Variables
@@ -63,7 +64,7 @@ If you want to use GridNeRF kernel fusion optimization, compile and install cust
 Our kernels rely on the third-party project `cutlass`, so you should clone and modify cutlass codes(it has error) in advance. See [here](https://github.com/InternLandMark/LandMark_Documentation/blob/main/kernel_docs/README.md) for help.
 ```
 pip install ninja --user
-pip uninstall pe pe-concate assign-blocks-to-samples compute-appfeature compute-beta compute-grid-sample-and-ewproduct compute-weight gemm-fp16 SamplerayGridsample expand-index-encoding expand-index-encoding-mlp
+pip uninstall pe pe-concate assign-blocks-to-samples compute-appfeature compute-beta compute-grid-sample-and-ewproduct compute-weight gemm-fp16 SamplerayGridsample expand-index-encoding expand-index-encoding-mlp SamplerayGridsample_dal assign_blocks_to_samples_dal compute_beta_dal compute_weight_dal grid_sampler_ndhwc_dal pe_concate_dal gemm_fp16_dal pe_dal expand_index_encoding_dal expand_index_encoding_mlp_dal frequency_encoding_dal
 export PATH=/home/$YOUR_DIR/.local/bin:$PATH
 export TORCH_CUDA_ARCH_LIST="5.2 6.0 6.1 7.0 7.5 8.0 8.6+PTX"
 export CUTLASS_DIR=/your_cutlass_dir/

@@ -11,6 +11,7 @@ from psutil import virtual_memory
 
 from app.models.gridnerf_branch_parallel import DistRenderGridNeRFBranchParallel
 from app.models.gridnerf_elastic import DistRenderGridNeRFElastic
+from app.models.gridnerf_elastic_cuda import DistRenderGridNeRFElasticCuda
 from app.models.gridnerf_sequential import GridNeRF
 from app.models.gridnerf_tensor_parallel import DistRenderGridNeRFTensorParallel
 from dist_render.comm.communication import all_gather, broadcast
@@ -357,6 +358,7 @@ class MultiBlockKernelFusionNerfDDPInfererImpl(MultiBlockTorchNerfDDPInfererImpl
         self._model.fullgrid = 0
         self._model.column_major = 0
         self._tensorf_cuda.allocate_tensors(self._model, self._chunk_size)
+
         self.set_forward_func(self._tensorf_cuda.forward)
         print("Load model sucessfully.")
 
@@ -415,6 +417,7 @@ class MovingAreaTorchNerfDDPInfererImpl(AbstractDDPInfererImpl):
         kwargs_tensors_to_device(kwargs, self._args.device)
 
         self._model = DistRenderGridNeRFElastic(**kwargs)  # pylint: disable=W0123
+
         rm_ddp_prefix_in_state_dict_if_present(ckpt["state_dict"])
         self._model.load(ckpt)
         del ckpt
@@ -448,6 +451,75 @@ class MovingAreaTorchNerfDDPInfererImpl(AbstractDDPInfererImpl):
             rays_chunk = rays[chunk_idx * self._chunk_size : (chunk_idx + 1) * self._chunk_size]
             ret = self._model(rays_chunk)
 
+            if isinstance(ret, tuple) and "rgb_map" in ret[0]:
+                all_ret.append(ret[0]["rgb_map"])
+            elif "rgb_map" in ret:
+                all_ret.append(ret["rgb_map"])
+            else:
+                print(ret, flush=True)
+                raise Exception("cannot find correct key for ret")
+        all_ret = torch.cat(all_ret, 0)
+        return all_ret
+
+
+class MovingAreaCudaKernelNerfDDPInfererImpl(AbstractDDPInfererImpl):
+    """
+    Infer operations of multi-block torch model.
+    """
+
+    def __init__(self, context) -> None:
+        super().__init__(context)
+
+        self._model = None
+        self._model_path = context.model_path
+
+    def load_model(self, H, W):
+        local_rank_within_node = ParallelContext().get_local_rank(ParallelGroup.ProcessesPerNode)
+        ckpt_fp = self._model_path
+        if local_rank_within_node != 0:
+            ckpt_fp = self._model_path[:-3] + "-wo_plane.th"
+        ckpt = torch.load(ckpt_fp, map_location="cpu")
+        kwargs = ckpt["kwargs"]
+        kwargs.update({"device": "cpu", "args": self._args, "neighbour_size": self._args.neighbour_size})
+        kwargs = self.remove_old_kwargs(kwargs)
+        kwargs_tensors_to_device(kwargs, self._args.device)
+
+        self._model = DistRenderGridNeRFElasticCuda(**kwargs)  # pylint: disable=W0123
+
+        rm_ddp_prefix_in_state_dict_if_present(ckpt["state_dict"])
+        self._model.load(ckpt)
+        del ckpt
+        gc.collect()
+        self._model.permute_and_split_model()
+        self._model.update_device(self._args.device)
+        self._model.allocate_tensors(self._chunk_size)
+
+    def meet_load_threshold(self, pose_o):
+        return self._model.meet_load_threshold(pose_o)
+
+    def switch_buffers(self):
+        return self._model.switch_buffers()
+
+    def init_buffers(self, pose_o, update_plane=False):
+        return self._model.init_buffers(pose_o, update_plane)
+
+    def update_buffers(self, pose_o, nccl_only=False):
+        return self._model.update_buffers(pose_o, nccl_only)
+
+    def renderer_fn(
+        self,
+        rays,
+        N_samples=-1,
+        white_bg=True,
+        is_train=False,
+        app_code=0,
+    ):  # pylint: disable=W0613
+        all_ret = []
+        N_rays_all = rays.shape[0]
+        self._model.allocate_buffers(self._chunk_size)
+        for chunk_idx in range(N_rays_all // self._chunk_size + int(N_rays_all % self._chunk_size > 0)):
+            rays_chunk = rays[chunk_idx * self._chunk_size : (chunk_idx + 1) * self._chunk_size]
+            ret = self._model(rays_chunk)
             if isinstance(ret, tuple) and "rgb_map" in ret[0]:
                 all_ret.append(ret[0]["rgb_map"])
             elif "rgb_map" in ret:

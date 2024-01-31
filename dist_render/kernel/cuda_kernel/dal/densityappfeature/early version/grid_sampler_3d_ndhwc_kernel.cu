@@ -207,7 +207,7 @@ template <typename scalar_t>
 __global__ static void grid_sample_3d_ndhwc2ncdhw(const scalar_t *__restrict__ input,
                                                   const scalar_t *__restrict__ sample_grid,
                                                   scalar_t *__restrict__ output, int n, int d,
-                                                  int h, int w, int c, int batch_size, bool isOptExpr) {
+                                                  int h, int w, int c, int batch_size, bool isOptExpr, bool isBoundJudge) {
   // clang-format on
   // Each workgroup find its work by indexing into [batch_size, c/c_tile]
   // workgroup's size is equal to c_tile
@@ -216,17 +216,20 @@ __global__ static void grid_sample_3d_ndhwc2ncdhw(const scalar_t *__restrict__ i
   // dim3 block_size(32, GridSampler::WARP_NUM, 1);
   int const threadid   = threadIdx.x + threadIdx.y * blockDim.x;
   int const blockid    = blockIdx.x + blockIdx.y * gridDim.x;
-  int const c_tile     = calc_channel_tile_size(c);
-  int const N_c_tile   = (c + c_tile - 1) / c_tile;
-  int const warp_idx   = threadid / 32;
-  int const lane_idx   = threadid % 32;
-  int const group_idx  = threadid / c_tile;
-  int const worker_idx = threadid % c_tile;
-  int const nanobatch  = 8;
-  int const microbatch = blockDim.x * blockDim.y / c_tile * nanobatch;
-  int const minibatch  = gridDim.x * gridDim.y * microbatch;
-  int const njobs      = n * batch_size * N_c_tile;
+  int const c_tile     = calc_channel_tile_size(c);     //channel块大小
+  int const N_c_tile   = (c + c_tile - 1) / c_tile;     //channel分几块
+  int const warp_idx   = threadid / 32;     // 第几个warp
+  int const lane_idx   = threadid % 32;     // warp里面的序号
+  int const group_idx  = threadid / c_tile; // 第几个group
+  int const worker_idx = threadid % c_tile; // group里面的序号
+  int const nanobatch  = 8;                                              // 一个nanobatch 做 8块
+  int const microbatch = blockDim.x * blockDim.y / c_tile * nanobatch;   // 一个microbatch做 32 * 8 * 8 / 16
+  int const minibatch  = gridDim.x * gridDim.y * microbatch;             // 一个minibatch做  256 *
+  int const njobs      = n * batch_size * N_c_tile;                      // 工作数 = 有效点数 * channel块    一个工作 = 1个有效点数 * channel块数 = channel块数个基本单元工作
   int job_offset_base  = blockid * microbatch + group_idx * nanobatch;
+                                                                         // 一个block 对应一个 microbatch 个工作
+                                                                         // 一个group 对应一个 nanobatch  个工作
+                                                                         // 一个thread做 8个基本单元工作
   uint32_t mask        = 0;
 
   int const wg_lane_start = lane_idx - worker_idx;
@@ -291,22 +294,24 @@ __global__ static void grid_sample_3d_ndhwc2ncdhw(const scalar_t *__restrict__ i
         int inp_sH = w * c;
         int inp_sW = c;
 
-        if ( isOptExpr && 0 <= iz_tnw && iz_bse < d && 0 <= iy_tnw && iy_bse < h && 0 <= ix_tnw && ix_bse < w) {
-          // strictly inside
-          float tnw = (ix_bse - ix) * (iy_bse - iy);
-          float tne = (ix - ix_tnw) * (iy_bse - iy);
-          float tsw = (ix_bse - ix) * (iy - iy_tnw);
-          float tse = (ix - ix_tnw) * (iy - iy_tnw);
-          // clang-format off
-          sum += (tnw * input_base[0] +
-                  tne * input_base[inp_sW] +
-                  tsw * input_base[inp_sH] +
-                  tse * input_base[inp_sH + inp_sW]) * (iz_bse - iz);
-          input_base += inp_sD;
-          sum += (tnw * input_base[0] +
-                  tne * input_base[inp_sW] +
-                  tsw * input_base[inp_sH] +
-                  tse * input_base[inp_sH + inp_sW]) * (iz - iz_tnw);
+        if ( isOptExpr ){
+          if ( !(isBoundJudge) || 0 <= iz_tnw && iz_bse < d && 0 <= iy_tnw && iy_bse < h && 0 <= ix_tnw && ix_bse < w) {
+            // strictly inside
+            float tnw = (ix_bse - ix) * (iy_bse - iy);
+            float tne = (ix - ix_tnw) * (iy_bse - iy);
+            float tsw = (ix_bse - ix) * (iy - iy_tnw);
+            float tse = (ix - ix_tnw) * (iy - iy_tnw);
+            // clang-format off
+            sum += (tnw * input_base[0] +
+                    tne * input_base[inp_sW] +
+                    tsw * input_base[inp_sH] +
+                    tse * input_base[inp_sH + inp_sW]) * (iz_bse - iz);
+            input_base += inp_sD;
+            sum += (tnw * input_base[0] +
+                    tne * input_base[inp_sW] +
+                    tsw * input_base[inp_sH] +
+                    tse * input_base[inp_sH + inp_sW]) * (iz - iz_tnw);
+          }
           // clang-format on
         } else {
           float tnw = (ix_bse - ix) * (iy_bse - iy) * (iz_bse - iz);
@@ -317,33 +322,35 @@ __global__ static void grid_sample_3d_ndhwc2ncdhw(const scalar_t *__restrict__ i
           float bne = (ix - ix_tnw) * (iy_bse - iy) * (iz - iz_tnw);
           float bsw = (ix_bse - ix) * (iy - iy_tnw) * (iz - iz_tnw);
           float bse = (ix - ix_tnw) * (iy - iy_tnw) * (iz - iz_tnw);
-          if (inrange(iz_tnw, d)) {
-            if (inrange(iy_tnw, h)) {
-              if (inrange(ix_tnw, w))
+
+
+          if (!(isBoundJudge) || inrange(iz_tnw, d)) {
+            if (!(isBoundJudge) || inrange(iy_tnw, h)) {
+              if (!(isBoundJudge) || inrange(ix_tnw, w))
                 sum += tnw * input_base[0];
-              if (inrange(ix_tnw + 1, w))
+              if (!(isBoundJudge) || inrange(ix_tnw + 1, w))
                 sum += tne * input_base[inp_sW];
             }
-            if (inrange(iy_tnw + 1, h)) {
-              if (inrange(ix_tnw, w))
+            if (!(isBoundJudge) || inrange(iy_tnw + 1, h)) {
+              if (!(isBoundJudge) || inrange(ix_tnw, w))
                 sum += tsw * input_base[inp_sH];
-              if (inrange(ix_tnw + 1, w))
+              if (!(isBoundJudge) || inrange(ix_tnw + 1, w))
                 sum += tse * input_base[inp_sH + inp_sW];
             }
           }
           input_base += inp_sD;
 
-          if (inrange(iz_tnw + 1, d)) {
-            if (inrange(iy_tnw, h)) {
-              if (inrange(ix_tnw, w))
+          if (!(isBoundJudge) || inrange(iz_tnw + 1, d)) {
+            if (!(isBoundJudge) || inrange(iy_tnw, h)) {
+              if (!(isBoundJudge) || inrange(ix_tnw, w))
                 sum += bnw * input_base[0];
-              if (inrange(ix_tnw + 1, w))
+              if (!(isBoundJudge) || inrange(ix_tnw + 1, w))
                 sum += bne * input_base[inp_sW];
             }
-            if (inrange(iy_tnw + 1, h)) {
-              if (inrange(ix_tnw, w))
+            if (!(isBoundJudge) || inrange(iy_tnw + 1, h)) {
+              if (!(isBoundJudge) || inrange(ix_tnw, w))
                 sum += bsw * input_base[inp_sH];
-              if (inrange(ix_tnw + 1, w))
+              if (!(isBoundJudge) || inrange(ix_tnw + 1, w))
                 sum += bse * input_base[inp_sH + inp_sW];
             }
           }
@@ -371,13 +378,13 @@ __global__ static void grid_sample_3d_ndhwc2ncdhw(const scalar_t *__restrict__ i
 } // namespace GridSampler
 
 void launch_grid_sample_3d_float(float *input, float *sample_grid, float *output, int n, int d,
-                                 int h, int w, int c, int batch_size, bool output_ncdhw, bool isOptExpr,
+                                 int h, int w, int c, int batch_size, bool output_ncdhw, bool isOptExpr, bool isBoundJudge,
                                  cudaStream_t stream) {
   dim3 grid_size(256, 1, 1);
   dim3 block_size(32, GridSampler::WARP_NUM, 1);
   if (output_ncdhw) {
     GridSampler::grid_sample_3d_ndhwc2ncdhw<float><<<grid_size, block_size, 0, stream>>>(
-        input, sample_grid, output, n, d, h, w, c, batch_size, isOptExpr);
+        input, sample_grid, output, n, d, h, w, c, batch_size, isOptExpr, isBoundJudge);
   } else {
     GridSampler::grid_sample_3d_ndhwc2ndhwc<float><<<grid_size, block_size, 0, stream>>>(
         input, sample_grid, output, n, d, h, w, c, batch_size);

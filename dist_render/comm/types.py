@@ -33,6 +33,7 @@ class ModelType(Enum):
     MultiBlockKernelFusion = "MultiBlockKernelFusion"
     MultiBlockTensorParallelKernelFusion = "MultiBlockTensorParallelKernelFusion"
     MovingAreaTorch = "MovingAreaTorch"
+    MovingAreaCudaKernel = "MovingAreaCudaKernel"
 
 
 class RunnerType(Enum):

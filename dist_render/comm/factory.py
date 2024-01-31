@@ -2,6 +2,7 @@ from dist_render.comm.types import DatasetType, ModelType, RunnerType
 from dist_render.dataset.city import CityTestData
 from dist_render.ddp_infer.context import NerfContext
 from dist_render.ddp_infer.inferer_impl import (
+    MovingAreaCudaKernelNerfDDPInfererImpl,
     MovingAreaTorchNerfDDPInfererImpl,
     MultiBlockKernelFusionNerfDDPInfererImpl,
     MultiBlockTensorParallelKernelFusionNerfDDPInfererImpl,
@@ -36,6 +37,8 @@ def inferer_impl_factory(model_type: ModelType, profile_stages: bool = False):
         return MultiBlockTensorParallelKernelFusionNerfDDPInfererImpl(context=context)
     elif model_type is ModelType.MovingAreaTorch:
         return MovingAreaTorchNerfDDPInfererImpl(context=context)
+    elif model_type is ModelType.MovingAreaCudaKernel:
+        return MovingAreaCudaKernelNerfDDPInfererImpl(context=context)
     else:
         raise NotImplementedError()
 

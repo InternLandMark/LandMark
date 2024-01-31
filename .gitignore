@@ -8,5 +8,11 @@ prof_dir/
 *.png
 *.log
 debug/
-app/.vscode/
-ci_scripts/
+*/build/
+*/dist/
+*/*.egg-info/
+.vscode/
+*/.vscode/
+*/*.egg-info/
+*/*.so
+*/core.*
